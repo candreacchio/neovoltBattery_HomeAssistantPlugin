@@ -39,6 +39,7 @@ from .const import (
     SENSOR_SELF_SUFFICIENCY,
     SENSOR_TREES_PLANTED,
     SENSOR_CO2_REDUCTION,
+    SENSOR_TOTAL_BATTERY_DISCHARGE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -146,6 +147,16 @@ async def async_setup_entry(
             "Total_Battery_Charge", 
             "kWh", 
             "mdi:battery-charging"
+        ),
+        ByteWattGridSensor(
+            coordinator,
+            entry,
+            SENSOR_TOTAL_BATTERY_DISCHARGE,
+            "Total Battery Discharge",
+            "energy",
+            "Total_Battery_Discharge",
+            "kWh",
+            "mdi:battery-minus"
         ),
         ByteWattGridSensor(
             coordinator, 
