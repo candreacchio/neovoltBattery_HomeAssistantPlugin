@@ -324,6 +324,8 @@ class NeovoltClient:
                             battery_data["Total_Feed_In"] = stats_data.get("eout")
                             # Total battery charge
                             battery_data["Total_Battery_Charge"] = stats_data.get("echarge")
+                            # Total battery discharge
+                            battery_data["Total_Battery_Discharge"] = stats_data.get("edischarge")
                             # PV to house
                             battery_data["PV_Power_House"] = stats_data.get("epv2load")
                             # PV charging battery

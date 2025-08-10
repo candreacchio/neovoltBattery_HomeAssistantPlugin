@@ -32,6 +32,7 @@ class GridData:
     total_solar_generation: float = 0
     total_feed_in: float = 0
     total_battery_charge: float = 0
+    total_battery_discharge: float = 0
     pv_power_house: float = 0
     pv_charging_battery: float = 0
     total_house_consumption: float = 0
@@ -45,6 +46,7 @@ class GridData:
             total_solar_generation=data.get("Total_Solar_Generation", 0),
             total_feed_in=data.get("Total_Feed_In", 0),
             total_battery_charge=data.get("Total_Battery_Charge", 0),
+            total_battery_discharge=data.get("Total_Battery_Discharge", 0),
             pv_power_house=data.get("PV_Power_House", 0),
             pv_charging_battery=data.get("PV_Charging_Battery", 0),
             total_house_consumption=data.get("Total_House_Consumption", 0),

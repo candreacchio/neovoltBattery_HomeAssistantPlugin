@@ -103,6 +103,7 @@ automation:
     - `epvT` → Total Solar Generation (kWh)
     - `eout` → Total Feed In (kWh)
     - `echarge` → Total Battery Charge (kWh)
+    - `edischarge` → Total Battery Discharge (kWh)
     - `epv2load` → PV Power to House (kWh)
     - `epvcharge` → PV Charging Battery (kWh)
     - `eload` → Total House Consumption (kWh)
