@@ -276,14 +276,16 @@ class NeovoltClient:
             # Now get the energy statistics
             stats_url = f"{self.base_url}/api/report/energy/getEnergyStatistics"
             
-            # Get date range from 2020-01-01 to today
-            # Use timezone-aware datetime to ensure we get the correct date at midnight
-            # This prevents the bug where at midnight we might get yesterday's date
+            # Get date range from 2020-01-01 to tomorrow
+            # TIMEZONE FIX: Using tomorrow's date as endDate prevents the midnight reset issue
+            # where cumulative totals temporarily show yesterday's values for ~30 minutes
+            # after midnight in timezones ahead of the API server (e.g., UTC+9:30)
+            # This ensures the API always returns complete data for "today"
             now = dt_util.now()
-            end_date = now.strftime("%Y-%m-%d")
+            end_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
             begin_date = "2020-01-01"
             
-            _LOGGER.debug("Fetching statistics for date range: %s to %s (current time: %s)", 
+            _LOGGER.debug("Fetching statistics for date range: %s to %s (tomorrow used for timezone fix, current time: %s)", 
                          begin_date, end_date, now.strftime("%Y-%m-%d %H:%M:%S %Z"))
             
             stats_params = {
