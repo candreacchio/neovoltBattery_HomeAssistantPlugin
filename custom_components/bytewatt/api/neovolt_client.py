@@ -147,8 +147,61 @@ class NeovoltClient:
             _LOGGER.error("Error connecting to Neovolt API with fallback method: %s", error)
             return False
     
+    async def async_get_device_menu_list(self) -> Optional[list]:
+        """Get enhanced device list with system details from menu API."""
+        if not self.token:
+            if not await self.async_login():
+                return None
+        
+        url = f"{self.base_url}/api/stable/home/getCustomMenuEssList"
+        
+        try:
+            async with asyncio.timeout(DEFAULT_TIMEOUT):
+                response = await self.session.get(
+                    url=url,
+                    headers=self._get_auth_headers()
+                )
+                
+                if response.status != 200:
+                    _LOGGER.error(
+                        "Failed to get device menu list with status %s: %s", 
+                        response.status, 
+                        await response.text()
+                    )
+                    
+                    # Try refreshing token and retrying the request
+                    if response.status == 401:
+                        if await self.async_login():
+                            return await self.async_get_device_menu_list()
+                    
+                    return None
+                
+                result = await response.json()
+                
+                if result.get("code") not in [0, 200]:
+                    # Check for session expiry
+                    if result.get("code") == 6069:
+                        _LOGGER.warning("Session expired (code 6069), attempting to re-login")
+                        if await self.async_login():
+                            return await self.async_get_device_menu_list()
+                    
+                    _LOGGER.error(
+                        "Failed to get device menu list with code %s: %s", 
+                        result.get("code"), 
+                        result.get("msg")
+                    )
+                    return None
+                
+                devices = result.get("data", [])
+                _LOGGER.debug("Found %d devices in menu list", len(devices))
+                return devices
+                
+        except (asyncio.TimeoutError, aiohttp.ClientError) as error:
+            _LOGGER.error("Error fetching device menu list: %s", error)
+            return None
+    
     async def async_get_device_list(self) -> Optional[Dict[str, Any]]:
-        """Get the list of devices."""
+        """Get the list of devices (legacy method, kept for compatibility)."""
         if not self.token:
             if not await self.async_login():
                 return None
@@ -198,8 +251,13 @@ class NeovoltClient:
             _LOGGER.error("Error fetching device list: %s", error)
             return None
     
-    async def async_get_battery_data(self, station_id: str = None) -> Optional[Dict[str, Any]]:
-        """Get data for a specific battery using the new API endpoint."""
+    async def async_get_battery_data(self, station_id: str = None, device_sn: str = "All") -> Optional[Dict[str, Any]]:
+        """Get data for a specific battery or all batteries.
+        
+        Args:
+            station_id: The station ID (optional)
+            device_sn: The device serial number or "All" for all devices (default: "All")
+        """
         if not self.token:
             if not await self.async_login():
                 return None
@@ -208,7 +266,7 @@ class NeovoltClient:
         url = f"{self.base_url}/api/report/energyStorage/getLastPowerData"
         
         params = {
-            "sysSn": "All",
+            "sysSn": device_sn,
             "stationId": station_id or ""
         }
         
@@ -245,7 +303,7 @@ class NeovoltClient:
                     # Try refreshing token and retrying the request
                     if response.status == 401:
                         if await self.async_login():
-                            return await self.async_get_battery_data(station_id)
+                            return await self.async_get_battery_data(station_id, device_sn)
                     
                     return None
                 
@@ -256,7 +314,7 @@ class NeovoltClient:
                     if result.get("code") == 6069:
                         _LOGGER.warning("Session expired (code 6069), attempting to re-login")
                         if await self.async_login():
-                            return await self.async_get_battery_data(station_id)
+                            return await self.async_get_battery_data(station_id, device_sn)
                     
                     _LOGGER.error(
                         "Failed to get battery power data with code %s: %s", 
@@ -289,7 +347,7 @@ class NeovoltClient:
                          begin_date, end_date, now.strftime("%Y-%m-%d %H:%M:%S %Z"))
             
             stats_params = {
-                "sysSn": "All", 
+                "sysSn": device_sn, 
                 "stationId": station_id or "",
                 "beginDate": begin_date,
                 "endDate": end_date
@@ -342,7 +400,7 @@ class NeovoltClient:
                         # Session expired while fetching statistics
                         _LOGGER.warning("Session expired (code 6069) during statistics fetch, attempting to re-login")
                         if await self.async_login():
-                            return await self.async_get_battery_data(station_id)
+                            return await self.async_get_battery_data(station_id, device_sn)
                     else:
                         _LOGGER.error(
                             "Failed to get energy statistics with code %s: %s", 
@@ -360,7 +418,7 @@ class NeovoltClient:
             today_date = now.strftime("%Y-%m-%d")
             
             today_params = {
-                "sn": "All",
+                "sn": device_sn,
                 "stationId": station_id or "",
                 "tday": today_date
             }
@@ -420,7 +478,7 @@ class NeovoltClient:
                         # Session expired while fetching today's stats
                         _LOGGER.warning("Session expired (code 6069) during today's stats fetch, attempting to re-login")
                         if await self.async_login():
-                            return await self.async_get_battery_data(station_id)
+                            return await self.async_get_battery_data(station_id, device_sn)
                     else:
                         _LOGGER.error(
                             "Failed to get today's stats with code %s: %s", 

@@ -58,11 +58,13 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
         scan_interval: int,
         entry_id: str,
         options: Dict[str, Any] = None,
+        device_sn: str = "All",
     ):
         """Initialize."""
         self.client = client
         self.hass = hass
         self.entry_id = entry_id
+        self.device_sn = device_sn
         self._last_battery_data = None
         self._scan_interval = scan_interval
         self._last_successful_update: Optional[datetime] = None
@@ -166,7 +168,7 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
             
             # Get battery data
             with self._timed_operation("get_battery_data"):
-                battery_data = await self.client.get_battery_data()
+                battery_data = await self.client.get_battery_data(device_sn=self.device_sn)
             
             # Get battery settings (don't fail if this fails)
             # Skip if we recently updated settings to prevent cache race condition
@@ -641,7 +643,7 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
         # Check battery data endpoint
         try:
             data_start = time.time()
-            battery_data = await self.client.get_battery_data()
+            battery_data = await self.client.get_battery_data(device_sn=self.device_sn)
             data_duration = time.time() - data_start
             
             api_checks["battery_endpoint"] = {

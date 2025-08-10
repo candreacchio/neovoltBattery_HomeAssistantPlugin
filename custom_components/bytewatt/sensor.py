@@ -15,6 +15,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     DOMAIN,
+    CONF_DEVICE_SN,
+    DEFAULT_DEVICE_SN,
     SENSOR_SOC,
     SENSOR_GRID_CONSUMPTION,
     SENSOR_HOUSE_CONSUMPTION,
@@ -339,7 +341,14 @@ class ByteWattSensor(CoordinatorEntity, SensorEntity):
         self._sensor_type = sensor_type
         self._attribute = attribute
         self._attr_name = name
-        self._attr_unique_id = f"{config_entry.entry_id}_{sensor_type}"
+        
+        # Include device SN in unique ID if not "All"
+        device_sn = config_entry.data.get(CONF_DEVICE_SN, DEFAULT_DEVICE_SN)
+        if device_sn != DEFAULT_DEVICE_SN:
+            self._attr_unique_id = f"{config_entry.entry_id}_{device_sn}_{sensor_type}"
+        else:
+            self._attr_unique_id = f"{config_entry.entry_id}_{sensor_type}"
+        
         self._attr_device_class = device_class
         self._attr_native_unit_of_measurement = unit
         self._attr_icon = icon
@@ -348,16 +357,27 @@ class ByteWattSensor(CoordinatorEntity, SensorEntity):
     @property
     def device_info(self):
         """Return device info."""
-        # Safely get username from config entry data
+        # Safely get username and device SN from config entry data
         username = "Unknown"
+        device_sn = DEFAULT_DEVICE_SN
         if self._config_entry.data:
             username = self._config_entry.data.get('username', 'Unknown')
+            device_sn = self._config_entry.data.get(CONF_DEVICE_SN, DEFAULT_DEVICE_SN)
+        
+        # Create device name based on SN
+        if device_sn != DEFAULT_DEVICE_SN:
+            device_name = f"Byte-Watt {device_sn[-4:]}"
+            device_id = f"{self._config_entry.entry_id}_{device_sn}"
+        else:
+            device_name = f"Byte-Watt Battery ({username})"
+            device_id = self._config_entry.entry_id
         
         return {
-            "identifiers": {(DOMAIN, self._config_entry.entry_id)},
-            "name": f"Byte-Watt Battery ({username})",
+            "identifiers": {(DOMAIN, device_id)},
+            "name": device_name,
             "manufacturer": "Byte-Watt",
             "model": "Battery Monitor",
+            "serial_number": device_sn if device_sn != DEFAULT_DEVICE_SN else None,
         }
 
     @property

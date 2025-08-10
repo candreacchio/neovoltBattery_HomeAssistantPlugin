@@ -9,6 +9,13 @@
           "password": "Password",
           "scan_interval": "Scan Interval (seconds)"
         }
+      },
+      "device": {
+        "title": "Select Device",
+        "description": "Choose which device to monitor. Select 'All Devices' to monitor all systems combined, or select a specific device for individual monitoring.",
+        "data": {
+          "device_sn": "Device"
+        }
       }
     },
     "error": {

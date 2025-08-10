@@ -24,9 +24,9 @@ class ByteWattClient:
         """Initialize or re-initialize the client."""
         return await self.api_client.async_login()
     
-    async def get_battery_data(self, station_id: str = None) -> Optional[Dict[str, Any]]:
+    async def get_battery_data(self, station_id: str = None, device_sn: str = "All") -> Optional[Dict[str, Any]]:
         """Get battery data from the API."""
-        return await self.api_client.async_get_battery_data(station_id)
+        return await self.api_client.async_get_battery_data(station_id, device_sn)
     
     async def get_device_list(self) -> Optional[Dict[str, Any]]:
         """Get list of devices from the API."""

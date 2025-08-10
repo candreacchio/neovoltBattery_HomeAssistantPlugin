@@ -15,6 +15,7 @@ from .const import (
     DOMAIN,
     CONF_USERNAME,
     CONF_PASSWORD,
+    CONF_DEVICE_SN,
     CONF_SCAN_INTERVAL,
     CONF_RECOVERY_ENABLED,
     CONF_HEARTBEAT_INTERVAL,
@@ -23,6 +24,7 @@ from .const import (
     CONF_NOTIFY_ON_RECOVERY,
     CONF_DIAGNOSTICS_MODE,
     CONF_AUTO_RECONNECT_TIME,
+    DEFAULT_DEVICE_SN,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_RECOVERY_ENABLED,
     DEFAULT_HEARTBEAT_INTERVAL,
@@ -64,6 +66,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Byte-Watt from a config entry."""
     username = entry.data[CONF_USERNAME]
     password = entry.data[CONF_PASSWORD]
+    device_sn = entry.data.get(CONF_DEVICE_SN, DEFAULT_DEVICE_SN)  # Default to "All" for existing configs
     
     # Get all configuration options with defaults
     options = entry.options or {}
@@ -81,13 +84,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     }
 
     client = ByteWattClient(hass, username, password)
+    
+    _LOGGER.info("Setting up ByteWatt integration for device: %s", device_sn)
 
     coordinator = ByteWattDataUpdateCoordinator(
         hass,
         client=client,
         scan_interval=scan_interval,
         entry_id=entry.entry_id,
-        options=recovery_options
+        options=recovery_options,
+        device_sn=device_sn
     )
 
     await coordinator.async_config_entry_first_refresh()

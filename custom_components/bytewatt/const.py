@@ -5,6 +5,7 @@ DOMAIN = "bytewatt"
 # Configuration
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
+CONF_DEVICE_SN = "device_sn"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_RECOVERY_ENABLED = "recovery_enabled"
 CONF_HEARTBEAT_INTERVAL = "heartbeat_interval"
@@ -15,6 +16,7 @@ CONF_DIAGNOSTICS_MODE = "diagnostics_mode"
 CONF_AUTO_RECONNECT_TIME = "auto_reconnect_time"
 
 # Defaults
+DEFAULT_DEVICE_SN = "All"  # Monitor all devices by default
 DEFAULT_SCAN_INTERVAL = 60  # 1 minute
 MIN_SCAN_INTERVAL = 30  # 30 seconds
 DEFAULT_RECOVERY_ENABLED = True
