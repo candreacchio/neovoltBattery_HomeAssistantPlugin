@@ -432,7 +432,67 @@ class NeovoltClient:
                         "Failed to get today's stats with status %s", 
                         today_response.status
                     )
-            
+
+            # Now get today's statistics
+            today_stats_url = f"{self.base_url}/api/report/power/staticsByDay"
+            today_stats_date = now.strftime("%Y-%m-%d")
+            today_stats_params = {
+                "sysSn": "",
+                "date": today_stats_date,
+            }
+
+            _LOGGER.debug("Fetching today's detailed stats from: %s with params: %s", today_stats_url, today_stats_params)
+            async with asyncio.timeout(DEFAULT_TIMEOUT):
+                try:
+                    today_stats_response = await self.session.get(
+                        url=today_stats_url,
+                        params=today_stats_params,
+                        headers=headers
+                    )
+                except (asyncio.TimeoutError, aiohttp.ClientError) as today_stats_error:
+                    _LOGGER.error("Error fetching today's detailed stats: %s", today_stats_error)
+                    # Return what we have so far
+                    return battery_data
+
+                if today_stats_response.status == 200:
+                    today_stats_result = await today_stats_response.json()
+                    _LOGGER.debug("Today's detailed stats response: %s", today_stats_result)
+
+                    if today_stats_result.get("code") == 200:
+                        stats_data = today_stats_result.get("data", {})
+                        _LOGGER.debug("Today's detailed stats data fields: %s", list(stats_data.keys()) if stats_data else "No data")
+
+                        # Map today's detailed stats to battery data
+                        if stats_data:
+                            battery_data["PV_Generated_Today"] = stats_data.get("epvtoday")
+                            battery_data["Consumed_Today"] = stats_data.get("ehomeload")
+                            battery_data["Feed_In_Today"] = stats_data.get("efeedIn")
+                            battery_data["Grid_Import_Today"] = stats_data.get("einput")
+                            battery_data["Battery_Charged_Today"] = stats_data.get("echarge")
+
+                            # Then we need to calculate the battery discharged
+                            total_gained = battery_data["PV_Generated_Today"] + battery_data["Grid_Import_Today"]
+                            total_used = battery_data["Consumed_Today"] + battery_data["Feed_In_Today"] + battery_data["Battery_Charged_Today"]
+                            # Nagative value indicates discharge, but we want positive displaying
+                            # Avoidng using of abs() for in case we got a positive value due to data issues
+                            battery_data["Battery_Discharged_Today"] = 0 - (total_gained - total_used)
+                    elif today_stats_result.get("code") == 6069:
+                        # Session expired while fetching today's detailed stats
+                        _LOGGER.warning("Session expired (code 6069) during today's detailed stats fetch, attempting to re-login")
+                        if await self.async_login():
+                            return await self.async_get_battery_data(station_id)
+                    else:
+                        _LOGGER.error(
+                            "Failed to get today's detailed stats with code %s: %s",
+                            today_stats_result.get("code"),
+                            today_stats_result.get("msg")
+                        )
+                else:
+                    _LOGGER.error(
+                        "Failed to get today's detailed stats with status %s",
+                        today_stats_response.status
+                    )
+
             _LOGGER.debug("Combined battery data: %s", battery_data)
             return battery_data
                 
