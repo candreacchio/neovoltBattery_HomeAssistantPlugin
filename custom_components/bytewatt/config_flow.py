@@ -12,8 +12,15 @@ from .const import (
     CONF_USERNAME, 
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
+    CONF_INVERTER_SNS,
+    CONF_CONTROL_VARIANT,
+    CONF_CONTROL_TARGET_SYSTEM_ID,
     DEFAULT_SCAN_INTERVAL,
-    MIN_SCAN_INTERVAL
+    MIN_SCAN_INTERVAL,
+    DEFAULT_INVERTER_SNS,
+    DEFAULT_CONTROL_VARIANT,
+    DEFAULT_CONTROL_TARGET_SYSTEM_ID,
+    CONTROL_VARIANT_OPTIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +58,15 @@ class ByteWattConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(
                         CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL
                     ): vol.All(vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL)),
+                    vol.Optional(
+                        CONF_INVERTER_SNS, default=DEFAULT_INVERTER_SNS
+                    ): str,
+                    vol.Optional(
+                        CONF_CONTROL_VARIANT, default=DEFAULT_CONTROL_VARIANT
+                    ): vol.In(CONTROL_VARIANT_OPTIONS),
+                    vol.Optional(
+                        CONF_CONTROL_TARGET_SYSTEM_ID, default=DEFAULT_CONTROL_TARGET_SYSTEM_ID
+                    ): str,
                 }
             ),
             errors=errors,
@@ -85,6 +101,29 @@ class ByteWattOptionsFlowHandler(config_entries.OptionsFlow):
                             CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
                         ),
                     ): vol.All(vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL)),
+                    vol.Optional(
+                        CONF_INVERTER_SNS,
+                        default=self.config_entry.options.get(
+                            CONF_INVERTER_SNS, DEFAULT_INVERTER_SNS
+                        ),
+                    ): str,
+                    vol.Optional(
+                        CONF_CONTROL_VARIANT,
+                        default=self.config_entry.options.get(
+                            CONF_CONTROL_VARIANT,
+                            self.config_entry.data.get(CONF_CONTROL_VARIANT, DEFAULT_CONTROL_VARIANT),
+                        ),
+                    ): vol.In(CONTROL_VARIANT_OPTIONS),
+                    vol.Optional(
+                        CONF_CONTROL_TARGET_SYSTEM_ID,
+                        default=self.config_entry.options.get(
+                            CONF_CONTROL_TARGET_SYSTEM_ID,
+                            self.config_entry.data.get(
+                                CONF_CONTROL_TARGET_SYSTEM_ID,
+                                DEFAULT_CONTROL_TARGET_SYSTEM_ID,
+                            ),
+                        ),
+                    ): str,
                 }
             ),
         )

@@ -1,6 +1,7 @@
 """The Byte-Watt integration."""
 import asyncio
 import logging
+import json
 
 import voluptuous as vol
 
@@ -8,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.const import CONF_SCAN_INTERVAL
 import homeassistant.helpers.config_validation as cv
+from homeassistant.util import dt as dt_util
 
 from .bytewatt_client import ByteWattClient
 from .coordinator import ByteWattDataUpdateCoordinator
@@ -16,6 +18,8 @@ from .const import (
     CONF_USERNAME,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
+    CONF_CONTROL_VARIANT,
+    CONF_CONTROL_TARGET_SYSTEM_ID,
     CONF_RECOVERY_ENABLED,
     CONF_HEARTBEAT_INTERVAL,
     CONF_MAX_DATA_AGE,
@@ -24,6 +28,8 @@ from .const import (
     CONF_DIAGNOSTICS_MODE,
     CONF_AUTO_RECONNECT_TIME,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_CONTROL_VARIANT,
+    DEFAULT_CONTROL_TARGET_SYSTEM_ID,
     DEFAULT_RECOVERY_ENABLED,
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_MAX_DATA_AGE,
@@ -38,9 +44,13 @@ from .const import (
     SERVICE_SET_MINIMUM_SOC,
     SERVICE_SET_CHARGE_CAP,
     SERVICE_UPDATE_BATTERY_SETTINGS,
+    SERVICE_UPDATE_CYCLE_STRATEGY,
+    SERVICE_SET_CYCLE_DAY_SCHEDULE,
     SERVICE_FORCE_RECONNECT,
     SERVICE_HEALTH_CHECK,
     SERVICE_TOGGLE_DIAGNOSTICS,
+    SERVICE_FORCE_CHARGE,
+    SERVICE_STOP_FORCE_CHARGE,
     ATTR_END_DISCHARGE,
     ATTR_START_DISCHARGE,
     ATTR_START_CHARGE,
@@ -68,9 +78,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Get all configuration options with defaults
     options = entry.options or {}
     scan_interval = options.get(CONF_SCAN_INTERVAL, entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
+    control_variant = options.get(CONF_CONTROL_VARIANT, entry.data.get(CONF_CONTROL_VARIANT, DEFAULT_CONTROL_VARIANT))
+    control_target_system_id = options.get(
+        CONF_CONTROL_TARGET_SYSTEM_ID,
+        entry.data.get(CONF_CONTROL_TARGET_SYSTEM_ID, DEFAULT_CONTROL_TARGET_SYSTEM_ID),
+    )
     
     # Recovery options (can be added to config flow for future customization)
     recovery_options = {
+        CONF_CONTROL_VARIANT: control_variant,
+        CONF_CONTROL_TARGET_SYSTEM_ID: control_target_system_id,
         CONF_RECOVERY_ENABLED: options.get(CONF_RECOVERY_ENABLED, DEFAULT_RECOVERY_ENABLED),
         CONF_HEARTBEAT_INTERVAL: options.get(CONF_HEARTBEAT_INTERVAL, DEFAULT_HEARTBEAT_INTERVAL),
         CONF_MAX_DATA_AGE: options.get(CONF_MAX_DATA_AGE, DEFAULT_MAX_DATA_AGE),
@@ -255,6 +272,191 @@ async def register_battery_services(hass: HomeAssistant, client: ByteWattClient,
                 _LOGGER.error(f"Could not create diagnostics notification: {e}")
         else:
             _LOGGER.error("No ByteWatt integrations found to toggle diagnostics")
+
+    def _get_primary_coordinator():
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            if entry_data and entry_data.get("coordinator"):
+                return entry_data["coordinator"]
+        return None
+
+    def _store_force_charge_diagnostics(coordinator, action: str, limit: int | None, results: dict):
+        diagnostics = {
+            "last_force_charge_action": action,
+            "last_force_charge_requested_limit": limit,
+            "last_force_charge_results": results,
+            "last_force_charge_updated_at": dt_util.now().isoformat(),
+        }
+        control_data = dict((coordinator.data or {}).get("control_variant", {}))
+        control_data.update(diagnostics)
+        coordinator._last_force_charge_diagnostics = diagnostics
+        coordinator._control_variant_info = control_data
+        if coordinator.data is not None:
+            coordinator.data["control_variant"] = control_data
+
+    def _resolve_force_charge_targets(call: ServiceCall, coordinator) -> list[dict]:
+        control_data = (coordinator.data or {}).get("control_variant", {})
+        inverters_data = (coordinator.data or {}).get("inverters", {})
+        candidate_map = {
+            candidate.get("system_id"): candidate
+            for candidate in (control_data.get("system_candidates") or [])
+            if candidate.get("system_id")
+        }
+        requested_system_id = call.data.get("system_id")
+        requested_sys_sn = call.data.get("sys_sn")
+        requested_charge_power = call.data.get("charge_power")
+
+        if requested_system_id:
+            candidate = candidate_map.get(requested_system_id, {})
+            resolved_sys_sn = requested_sys_sn or candidate.get("sys_sn")
+            current_soc = None
+            if resolved_sys_sn:
+                current_soc = (inverters_data.get(resolved_sys_sn) or {}).get("soc")
+            return [{
+                "system_id": requested_system_id,
+                "sys_sn": resolved_sys_sn,
+                "charge_power": requested_charge_power,
+                "current_soc": current_soc,
+            }]
+
+        raw_targets = control_data.get("system_candidates") or []
+        targets = []
+        seen_system_ids = set()
+        for candidate in raw_targets:
+            system_id = candidate.get("system_id")
+            if not system_id or system_id in seen_system_ids:
+                continue
+            seen_system_ids.add(system_id)
+            try:
+                default_power = int(float(candidate.get("poinv") or 5000))
+            except (TypeError, ValueError):
+                default_power = 5000
+            targets.append({
+                "system_id": system_id,
+                "sys_sn": candidate.get("sys_sn"),
+                "charge_power": requested_charge_power if requested_charge_power is not None else default_power,
+                "current_soc": (inverters_data.get(candidate.get("sys_sn")) or {}).get("soc"),
+            })
+
+        if targets:
+            return targets
+
+        fallback_system_id = (
+            control_data.get("control_system_id")
+            or control_data.get("target_system_id")
+            or control_data.get("system_id")
+        )
+        if not fallback_system_id:
+            return []
+        return [{
+            "system_id": fallback_system_id,
+            "sys_sn": requested_sys_sn,
+            "charge_power": requested_charge_power,
+            "current_soc": (inverters_data.get(requested_sys_sn) or {}).get("soc") if requested_sys_sn else None,
+        }]
+
+    async def handle_force_charge(call: ServiceCall):
+        """Handle force-charge control for one or more ByteWatt systems."""
+        coordinator = _get_primary_coordinator()
+        if not coordinator:
+            _LOGGER.error("No ByteWatt integration found")
+            return False
+
+        targets = _resolve_force_charge_targets(call, coordinator)
+        if not targets:
+            _LOGGER.error("No ByteWatt systems available for force charge")
+            return False
+
+        limit = int(call.data.get("limit", 95))
+        results = {}
+        all_ok = True
+        attempted = False
+
+        for target in targets:
+            system_id = target["system_id"]
+            current_soc = target.get("current_soc")
+            if current_soc is not None and float(current_soc) >= limit:
+                results[system_id] = {
+                    "sys_sn": target.get("sys_sn"),
+                    "charge_power": target.get("charge_power"),
+                    "current_soc": current_soc,
+                    "skipped": True,
+                    "skip_reason": "soc_at_or_above_limit",
+                    "api_ok": True,
+                }
+                continue
+
+            attempted = True
+            ok = await coordinator.client.force_charge(
+                system_id=system_id,
+                sys_sn=target.get("sys_sn"),
+                limit=limit,
+                charge_power=target.get("charge_power"),
+            )
+            results[system_id] = {
+                "sys_sn": target.get("sys_sn"),
+                "charge_power": target.get("charge_power"),
+                "current_soc": current_soc,
+                "api_ok": ok,
+            }
+            all_ok = all_ok and ok
+
+        await asyncio.sleep(2)
+        for system_id, result in results.items():
+            result["status"] = await coordinator.client.get_force_charge_status(system_id)
+            result["limit"] = await coordinator.client.get_force_charge_limit(system_id)
+
+        verified_ok = True
+        for result in results.values():
+            if result.get("skipped"):
+                continue
+            applied_limit = result.get("limit")
+            limit_matches = applied_limit is not None and abs(float(applied_limit) - limit) < 0.01
+            if not (result.get("api_ok") and (result.get("status") is True or limit_matches)):
+                verified_ok = False
+                break
+
+        if not attempted:
+            _LOGGER.warning("Force charge skipped for all targets because SOC is already at or above %s%%", limit)
+        _store_force_charge_diagnostics(coordinator, "force_charge", limit, results)
+        _LOGGER.info("Force charge results: %s", results)
+        await coordinator.async_request_refresh()
+        return all_ok and verified_ok
+
+    async def handle_stop_force_charge(call: ServiceCall):
+        """Handle stopping force charge for one or more ByteWatt systems."""
+        coordinator = _get_primary_coordinator()
+        if not coordinator:
+            _LOGGER.error("No ByteWatt integration found")
+            return False
+
+        targets = _resolve_force_charge_targets(call, coordinator)
+        if not targets:
+            _LOGGER.error("No ByteWatt systems available to stop force charge")
+            return False
+
+        results = {}
+        all_ok = True
+        for target in targets:
+            system_id = target["system_id"]
+            ok = await coordinator.client.stop_force_charge(system_id=system_id)
+            results[system_id] = {"api_ok": ok}
+            all_ok = all_ok and ok
+
+        await asyncio.sleep(2)
+        for system_id, result in results.items():
+            result["status"] = await coordinator.client.get_force_charge_status(system_id)
+            result["limit"] = await coordinator.client.get_force_charge_limit(system_id)
+
+        verified_ok = all(
+            result["api_ok"] and result.get("status") is False
+            for result in results.values()
+            if result.get("status") is not None
+        )
+        _store_force_charge_diagnostics(coordinator, "stop_force_charge", None, results)
+        _LOGGER.info("Stop force charge results: %s", results)
+        await coordinator.async_request_refresh()
+        return all_ok and verified_ok
     
     # Legacy service - set discharge end time only
     async def handle_set_discharge_time(call: ServiceCall):
@@ -442,13 +644,24 @@ async def register_battery_services(hass: HomeAssistant, client: ByteWattClient,
         discharge_end_time = call.data.get(ATTR_END_DISCHARGE)
         charge_start_time = call.data.get(ATTR_START_CHARGE)
         charge_end_time = call.data.get(ATTR_END_CHARGE)
+        charge_start_time_2 = call.data.get("start_charge_2")
+        charge_end_time_2 = call.data.get("end_charge_2")
+        discharge_start_time_2 = call.data.get("start_discharge_2")
+        discharge_end_time_2 = call.data.get("end_discharge_2")
         minimum_soc = call.data.get(ATTR_MINIMUM_SOC)
         charge_cap = call.data.get(ATTR_CHARGE_CAP)
+        ups_reserve = call.data.get("ups_reserve")
+        charge_mode_setting = call.data.get("charge_mode_setting")
+        export_limit_w1 = call.data.get("export_limit_w1")
+        export_limit_w2 = call.data.get("export_limit_w2")
         
         # Check if at least one parameter is provided
         if (discharge_start_time is None and discharge_end_time is None and
                 charge_start_time is None and charge_end_time is None and
-                minimum_soc is None and charge_cap is None):
+                charge_start_time_2 is None and charge_end_time_2 is None and
+                discharge_start_time_2 is None and discharge_end_time_2 is None and
+                minimum_soc is None and charge_cap is None and ups_reserve is None and
+                charge_mode_setting is None and export_limit_w1 is None and export_limit_w2 is None):
             _LOGGER.error("No battery settings provided to update")
             return
 
@@ -461,6 +674,16 @@ async def register_battery_services(hass: HomeAssistant, client: ByteWattClient,
         if not coordinator:
             _LOGGER.error("No ByteWatt integration found")
             return False
+
+        control_data = (coordinator.data or {}).get("control_variant", {})
+        effective_variant = control_data.get("effective_variant")
+        if effective_variant and effective_variant != "charge_config":
+            _LOGGER.error(
+                "Refusing legacy update_battery_settings write while control variant is '%s'; "
+                "system appears to be using cycle-strategy controls",
+                effective_variant,
+            )
+            return False
         
         # Update battery settings
         success = await coordinator.client.update_battery_settings(
@@ -468,8 +691,16 @@ async def register_battery_services(hass: HomeAssistant, client: ByteWattClient,
             discharge_end_time=discharge_end_time,
             charge_start_time=charge_start_time,
             charge_end_time=charge_end_time,
+            charge_start_time_2=charge_start_time_2,
+            charge_end_time_2=charge_end_time_2,
+            discharge_start_time_2=discharge_start_time_2,
+            discharge_end_time_2=discharge_end_time_2,
             minimum_soc=minimum_soc,
-            charge_cap=charge_cap
+            charge_cap=charge_cap,
+            ups_reserve=ups_reserve,
+            charge_mode_setting=charge_mode_setting,
+            export_limit_w1=export_limit_w1,
+            export_limit_w2=export_limit_w2,
         )
         
         if success:
@@ -477,6 +708,136 @@ async def register_battery_services(hass: HomeAssistant, client: ByteWattClient,
         else:
             _LOGGER.error("Failed to update battery settings")
         
+        return success
+
+    async def handle_update_cycle_strategy(call: ServiceCall):
+        """Handle cycle-strategy based discharge control updates."""
+        charge_start_time = call.data.get(ATTR_START_CHARGE)
+        charge_end_time = call.data.get(ATTR_END_CHARGE)
+        charge_cap = call.data.get(ATTR_CHARGE_CAP)
+        charge_power = call.data.get("charge_power")
+        charge_enabled = call.data.get("charge_enabled")
+        discharge_start_time = call.data.get(ATTR_START_DISCHARGE)
+        discharge_end_time = call.data.get(ATTR_END_DISCHARGE)
+        minimum_soc = call.data.get(ATTR_MINIMUM_SOC)
+        discharge_power = call.data.get("discharge_power")
+        discharge_enabled = call.data.get("discharge_enabled")
+
+        coordinator = None
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+            break
+
+        if not coordinator:
+            _LOGGER.error("No ByteWatt integration found")
+            return False
+
+        control_data = (coordinator.data or {}).get("control_variant", {})
+        system_id = control_data.get("system_id")
+        target_system_id = call.data.get("system_id") or control_data.get("target_system_id") or system_id
+        effective_variant = control_data.get("effective_variant")
+
+        if effective_variant != "cycle_strategy":
+            _LOGGER.error(
+                "Refusing cycle strategy update because active control variant is '%s'",
+                effective_variant,
+            )
+            return False
+
+        if not target_system_id:
+            _LOGGER.error("No cycle-strategy system_id detected")
+            return False
+
+        success = await coordinator.client.update_cycle_strategy(
+            system_id=target_system_id,
+            charge_start_time=charge_start_time,
+            charge_end_time=charge_end_time,
+            charge_cap=charge_cap,
+            charge_power=charge_power,
+            charge_enabled=charge_enabled,
+            discharge_start_time=discharge_start_time,
+            discharge_end_time=discharge_end_time,
+            minimum_soc=minimum_soc,
+            discharge_power=discharge_power,
+            discharge_enabled=discharge_enabled,
+        )
+
+        if success:
+            _LOGGER.info("Successfully updated cycle strategy")
+            await coordinator.async_request_refresh()
+        else:
+            _LOGGER.error("Failed to update cycle strategy")
+
+        return success
+
+    async def handle_set_cycle_day_schedule(call: ServiceCall):
+        """Handle full day cycle schedule updates for cycle-strategy systems."""
+        coordinator = None
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+            break
+
+        if not coordinator:
+            _LOGGER.error("No ByteWatt integration found")
+            return False
+
+        control_data = (coordinator.data or {}).get("control_variant", {})
+        system_id = control_data.get("system_id")
+        target_system_id = call.data.get("system_id") or control_data.get("target_system_id") or system_id
+        effective_variant = control_data.get("effective_variant")
+
+        if effective_variant != "cycle_strategy":
+            _LOGGER.error(
+                "Refusing cycle day schedule update because active control variant is '%s'",
+                effective_variant,
+            )
+            return False
+
+        if not target_system_id:
+            _LOGGER.error("No cycle-strategy system_id detected")
+            return False
+
+        charge_windows = call.data.get("charge_windows")
+        discharge_windows = call.data.get("discharge_windows")
+        minimum_soc = call.data.get(ATTR_MINIMUM_SOC)
+        charge_cap = call.data.get(ATTR_CHARGE_CAP)
+        charge_power = call.data.get("charge_power")
+        discharge_power = call.data.get("discharge_power")
+
+        if isinstance(charge_windows, str):
+            charge_windows = json.loads(charge_windows)
+        if isinstance(discharge_windows, str):
+            discharge_windows = json.loads(discharge_windows)
+
+        _LOGGER.info(
+            "Requested cycle day schedule update for %s with %s charge windows and %s discharge windows",
+            target_system_id,
+            len(charge_windows or []),
+            len(discharge_windows or []),
+        )
+
+        success = await coordinator.client.update_cycle_strategy(
+            system_id=target_system_id,
+            charge_windows=charge_windows,
+            discharge_windows=discharge_windows,
+            charge_cap=charge_cap,
+            minimum_soc=minimum_soc,
+            charge_power=charge_power,
+            discharge_power=discharge_power,
+            charge_enabled=bool(charge_windows),
+            discharge_enabled=bool(discharge_windows),
+        )
+
+        if success:
+            _LOGGER.info(
+                "Successfully updated cycle day schedule (%s charge windows, %s discharge windows)",
+                len(charge_windows or []),
+                len(discharge_windows or []),
+            )
+            await coordinator.async_request_refresh()
+        else:
+            _LOGGER.error("Failed to update cycle day schedule")
+
         return success
 
     # Register all services
@@ -544,6 +905,71 @@ async def register_battery_services(hass: HomeAssistant, client: ByteWattClient,
             vol.Optional(ATTR_START_CHARGE): cv.string,
             vol.Optional(ATTR_END_CHARGE): cv.string,
             vol.Optional(ATTR_MINIMUM_SOC): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+            vol.Optional(ATTR_CHARGE_CAP): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+            vol.Optional("start_charge_2"): cv.string,
+            vol.Optional("end_charge_2"): cv.string,
+            vol.Optional("start_discharge_2"): cv.string,
+            vol.Optional("end_discharge_2"): cv.string,
+            vol.Optional("ups_reserve"): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+            vol.Optional("charge_mode_setting"): vol.All(vol.Coerce(int), vol.Range(min=0, max=10)),
+            vol.Optional("export_limit_w1"): vol.All(vol.Coerce(int), vol.Range(min=0, max=50000)),
+            vol.Optional("export_limit_w2"): vol.All(vol.Coerce(int), vol.Range(min=0, max=50000)),
+        })
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_UPDATE_CYCLE_STRATEGY,
+        handle_update_cycle_strategy,
+        schema=vol.Schema({
+            vol.Optional(ATTR_START_CHARGE): cv.string,
+            vol.Optional(ATTR_END_CHARGE): cv.string,
+            vol.Optional(ATTR_CHARGE_CAP): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+            vol.Optional("charge_power"): vol.All(vol.Coerce(int), vol.Range(min=0, max=50000)),
+            vol.Optional("charge_enabled"): cv.boolean,
+            vol.Optional(ATTR_START_DISCHARGE): cv.string,
+            vol.Optional(ATTR_END_DISCHARGE): cv.string,
+            vol.Optional(ATTR_MINIMUM_SOC): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+            vol.Optional("discharge_power"): vol.All(vol.Coerce(int), vol.Range(min=0, max=50000)),
+            vol.Optional("discharge_enabled"): cv.boolean,
+            vol.Optional("system_id"): cv.string,
+        })
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_CYCLE_DAY_SCHEDULE,
+        handle_set_cycle_day_schedule,
+        schema=vol.Schema({
+            vol.Optional("charge_windows"): vol.Any(cv.string, list),
+            vol.Optional("discharge_windows"): vol.Any(cv.string, list),
+            vol.Optional(ATTR_MINIMUM_SOC): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+            vol.Optional(ATTR_CHARGE_CAP): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+            vol.Optional("charge_power"): vol.All(vol.Coerce(int), vol.Range(min=0, max=50000)),
+            vol.Optional("discharge_power"): vol.All(vol.Coerce(int), vol.Range(min=0, max=50000)),
+            vol.Optional("system_id"): cv.string,
+        })
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FORCE_CHARGE,
+        handle_force_charge,
+        schema=vol.Schema({
+            vol.Optional("limit", default=95): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+            vol.Optional("charge_power"): vol.All(vol.Coerce(int), vol.Range(min=0, max=50000)),
+            vol.Optional("system_id"): cv.string,
+            vol.Optional("sys_sn"): cv.string,
+        })
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_STOP_FORCE_CHARGE,
+        handle_stop_force_charge,
+        schema=vol.Schema({
+            vol.Optional("system_id"): cv.string,
+            vol.Optional("sys_sn"): cv.string,
         })
     )
     

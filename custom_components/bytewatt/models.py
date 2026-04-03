@@ -3,6 +3,21 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 
 
+def detect_control_variant_from_settings(data: Dict[str, Any]) -> str:
+    """Infer the active control variant from a charge-config payload."""
+    if not isinstance(data, dict):
+        return "unknown"
+
+    # Legacy/simple model: direct windows and flags in getChargeConfigInfo.
+    # Cycle-strategy model is usually indicated by richer strategy-only fields,
+    # but for charge-config payload alone we treat it as charge_config unless
+    # proven otherwise by dedicated cycle strategy data.
+    if any(key in data for key in ["gridCharge", "ctrDis", "timeChaf1", "timeDisf1"]):
+        return "charge_config"
+
+    return "unknown"
+
+
 @dataclass
 class SoCData:
     """Represents battery State of Charge data."""
@@ -102,6 +117,7 @@ class BatterySettings:
     
     # Additional fields
     additional_fields: Dict[str, Any] = field(default_factory=dict)
+    control_variant: str = "charge_config"
     
     @classmethod
     def from_api_response(cls, data: Dict[str, Any]) -> "BatterySettings":
@@ -139,6 +155,7 @@ class BatterySettings:
             pm_offset_e1a=data.get("pm_offset_e1a", "00:00"),
             pm_offset_s2a=data.get("pm_offset_s2a", "00:00"),
             pm_offset_e2a=data.get("pm_offset_e2a", "00:00"),
+            control_variant=detect_control_variant_from_settings(data),
         )
         
         # Store additional fields
@@ -177,9 +194,9 @@ class BatterySettings:
         """Convert settings to dictionary for API submissions using new API format."""
         result = {
             "id": "",  # Empty for all devices
-            "basicModeJp": None,
-            "peaceModeJp": None,
-            "vppModeJp": None,
+            "basicModeJp": self.additional_fields.get("basicModeJp"),
+            "peaceModeJp": self.additional_fields.get("peaceModeJp"),
+            "vppModeJp": self.additional_fields.get("vppModeJp"),
             "gridCharge": self.grid_charge,
             "timeChaf1": self.time_chaf1a,
             "timeChae1": self.time_chae1a,
@@ -192,22 +209,22 @@ class BatterySettings:
             "timeDise2": self.time_dise2a,
             "batHighCap": float(self.bat_high_cap) if isinstance(self.bat_high_cap, str) else self.bat_high_cap,
             "batUseCap": self.bat_use_cap,
-            "batCapRange": [5, 100],  # Default range
+            "batCapRange": self.additional_fields.get("batCapRange", [5, 100]),
             "isJapaneseDevice": False,
-            "upsReserveEnable": True,
-            "upsReserve": 1,
-            "mbat": "BW-BAT-10.1P",  # Default battery model
-            "chargeModeSetting": 0,
-            "loadcutoutEn": 0,
-            "cutoffSoc": 0,
-            "wakeupSoc": 0,
-            "timeChaMode": 0,
-            "hasBalconyModel": 0,
-            "balconyModel": None,
-            "timeExpLimW1": 800,
-            "timeExpLimW2": 800,
-            "isSiteDevice": None,
-            "isSupportOffGridSocControl": True,
+            "upsReserveEnable": self.additional_fields.get("upsReserveEnable", True),
+            "upsReserve": self.additional_fields.get("upsReserve", 1),
+            "mbat": self.additional_fields.get("mbat", "BW-BAT-10.1P"),
+            "chargeModeSetting": self.additional_fields.get("chargeModeSetting", 0),
+            "loadcutoutEn": self.additional_fields.get("loadcutoutEn", 0),
+            "cutoffSoc": self.additional_fields.get("cutoffSoc", 0),
+            "wakeupSoc": self.additional_fields.get("wakeupSoc", 0),
+            "timeChaMode": self.additional_fields.get("timeChaMode", 0),
+            "hasBalconyModel": self.additional_fields.get("hasBalconyModel", 0),
+            "balconyModel": self.additional_fields.get("balconyModel"),
+            "timeExpLimW1": self.additional_fields.get("timeExpLimW1", 800),
+            "timeExpLimW2": self.additional_fields.get("timeExpLimW2", 800),
+            "isSiteDevice": self.additional_fields.get("isSiteDevice"),
+            "isSupportOffGridSocControl": self.additional_fields.get("isSupportOffGridSocControl", True),
         }
         
         # Add additional fields

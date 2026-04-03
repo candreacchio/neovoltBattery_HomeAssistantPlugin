@@ -26,6 +26,10 @@ async def async_setup_entry(
     entities = [
         ByteWattChargeCapNumber(coordinator, config_entry),
         ByteWattMinimumSOCNumber(coordinator, config_entry),
+        ByteWattUPSReserveNumber(coordinator, config_entry),
+        ByteWattChargeModeSettingNumber(coordinator, config_entry),
+        ByteWattExportLimitWindow1Number(coordinator, config_entry),
+        ByteWattExportLimitWindow2Number(coordinator, config_entry),
     ]
 
     async_add_entities(entities)
@@ -68,6 +72,27 @@ class ByteWattNumberEntity(CoordinatorEntity, NumberEntity):
             "model": "Battery Management System",
             "sw_version": "1.0.0",
         }
+
+    def _effective_control_variant(self) -> Optional[str]:
+        """Return the currently effective control variant."""
+        try:
+            control_data = (self.coordinator.data or {}).get("control_variant", {})
+            return control_data.get("effective_variant")
+        except Exception:
+            return None
+
+    @property
+    def available(self) -> bool:
+        """Only expose legacy number controls for legacy charge-config systems."""
+        try:
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            has_cache = hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache is not None
+        except Exception:
+            has_cache = False
+        variant = self._effective_control_variant()
+        if variant and variant != "charge_config":
+            return False
+        return has_cache
 
 
 class ByteWattMinimumSOCNumber(ByteWattNumberEntity):
@@ -163,3 +188,160 @@ class ByteWattChargeCapNumber(ByteWattNumberEntity):
                 _LOGGER.error(f"Failed to update charge cap to {value}%")
         except Exception as ex:
             _LOGGER.error(f"Error setting charge cap to {value}%: {ex}")
+
+
+class ByteWattUPSReserveNumber(ByteWattNumberEntity):
+    """Number entity for UPS reserve."""
+
+    def __init__(self, coordinator: ByteWattDataUpdateCoordinator, config_entry: ConfigEntry) -> None:
+        super().__init__(
+            coordinator=coordinator,
+            config_entry=config_entry,
+            name="UPS Reserve",
+            unique_id="ups_reserve",
+            icon="mdi:battery-lock",
+            min_value=0,
+            max_value=100,
+            step=1,
+            device_class=NumberDeviceClass.BATTERY,
+        )
+        self._attr_native_unit_of_measurement = "%"
+
+    @property
+    def native_value(self) -> Optional[float]:
+        try:
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
+                settings = client.api_client._settings_cache
+                return float(settings.additional_fields.get("upsReserve", 0))
+        except (ValueError, TypeError, AttributeError) as ex:
+            _LOGGER.debug(f"Error getting UPS reserve: {ex}")
+        return None
+
+    async def async_set_native_value(self, value: float) -> None:
+        try:
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            success = await client.update_battery_settings(ups_reserve=int(value))
+            if success:
+                if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
+                    client.api_client._settings_cache.additional_fields["upsReserve"] = int(value)
+                await self.coordinator.async_request_refresh()
+        except Exception as ex:
+            _LOGGER.error(f"Error setting UPS reserve to {value}%: {ex}")
+
+
+class ByteWattChargeModeSettingNumber(ByteWattNumberEntity):
+    """Number entity for charge mode setting."""
+
+    def __init__(self, coordinator: ByteWattDataUpdateCoordinator, config_entry: ConfigEntry) -> None:
+        super().__init__(
+            coordinator=coordinator,
+            config_entry=config_entry,
+            name="Charge Mode Setting",
+            unique_id="charge_mode_setting",
+            icon="mdi:tune-variant",
+            min_value=0,
+            max_value=5,
+            step=1,
+        )
+
+    @property
+    def native_value(self) -> Optional[float]:
+        try:
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
+                settings = client.api_client._settings_cache
+                raw = settings.additional_fields.get("chargeModeSetting", 0)
+                return float(raw)
+        except (ValueError, TypeError, AttributeError) as ex:
+            _LOGGER.debug(f"Error getting charge mode setting: {ex}")
+        return None
+
+    async def async_set_native_value(self, value: float) -> None:
+        try:
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            success = await client.update_battery_settings(charge_mode_setting=int(value))
+            if success:
+                if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
+                    client.api_client._settings_cache.additional_fields["chargeModeSetting"] = int(value)
+                await self.coordinator.async_request_refresh()
+        except Exception as ex:
+            _LOGGER.error(f"Error setting charge mode setting to {value}: {ex}")
+
+
+class ByteWattExportLimitWindow1Number(ByteWattNumberEntity):
+    """Number entity for export limit window 1."""
+
+    def __init__(self, coordinator: ByteWattDataUpdateCoordinator, config_entry: ConfigEntry) -> None:
+        super().__init__(
+            coordinator=coordinator,
+            config_entry=config_entry,
+            name="Export Limit Window 1",
+            unique_id="export_limit_window_1",
+            icon="mdi:transmission-tower-export",
+            min_value=0,
+            max_value=20000,
+            step=50,
+        )
+        self._attr_native_unit_of_measurement = "W"
+
+    @property
+    def native_value(self) -> Optional[float]:
+        try:
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
+                settings = client.api_client._settings_cache
+                return float(settings.additional_fields.get("timeExpLimW1", 800))
+        except (ValueError, TypeError, AttributeError) as ex:
+            _LOGGER.debug(f"Error getting export limit window 1: {ex}")
+        return None
+
+    async def async_set_native_value(self, value: float) -> None:
+        try:
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            success = await client.update_battery_settings(export_limit_w1=int(value))
+            if success:
+                if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
+                    client.api_client._settings_cache.additional_fields["timeExpLimW1"] = int(value)
+                await self.coordinator.async_request_refresh()
+        except Exception as ex:
+            _LOGGER.error(f"Error setting export limit window 1 to {value}: {ex}")
+
+
+class ByteWattExportLimitWindow2Number(ByteWattNumberEntity):
+    """Number entity for export limit window 2."""
+
+    def __init__(self, coordinator: ByteWattDataUpdateCoordinator, config_entry: ConfigEntry) -> None:
+        super().__init__(
+            coordinator=coordinator,
+            config_entry=config_entry,
+            name="Export Limit Window 2",
+            unique_id="export_limit_window_2",
+            icon="mdi:transmission-tower-export",
+            min_value=0,
+            max_value=20000,
+            step=50,
+        )
+        self._attr_native_unit_of_measurement = "W"
+
+    @property
+    def native_value(self) -> Optional[float]:
+        try:
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
+                settings = client.api_client._settings_cache
+                return float(settings.additional_fields.get("timeExpLimW2", 800))
+        except (ValueError, TypeError, AttributeError) as ex:
+            _LOGGER.debug(f"Error getting export limit window 2: {ex}")
+        return None
+
+    async def async_set_native_value(self, value: float) -> None:
+        try:
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            success = await client.update_battery_settings(export_limit_w2=int(value))
+            if success:
+                if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
+                    client.api_client._settings_cache.additional_fields["timeExpLimW2"] = int(value)
+                await self.coordinator.async_request_refresh()
+        except Exception as ex:
+            _LOGGER.error(f"Error setting export limit window 2 to {value}: {ex}")

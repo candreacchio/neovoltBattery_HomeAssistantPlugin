@@ -83,7 +83,12 @@ class ByteWattSwitchEntity(CoordinatorEntity, SwitchEntity):
         """Return if entity is available."""
         try:
             client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
-            return hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache is not None
+            has_cache = hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache is not None
+            control_data = (self.coordinator.data or {}).get("control_variant", {})
+            variant = control_data.get("effective_variant")
+            if variant and variant != "charge_config":
+                return False
+            return has_cache
         except Exception:
             return False
 

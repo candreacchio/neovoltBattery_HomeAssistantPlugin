@@ -19,18 +19,22 @@ from homeassistant.util import dt as dt_util
 from .bytewatt_client import ByteWattClient
 from .const import (
     DOMAIN,
+    CONF_CONTROL_VARIANT,
+    CONF_CONTROL_TARGET_SYSTEM_ID,
     CONF_HEARTBEAT_INTERVAL,
     CONF_MAX_DATA_AGE,
     CONF_STALE_CHECKS_THRESHOLD,
     CONF_NOTIFY_ON_RECOVERY,
     CONF_DIAGNOSTICS_MODE,
     CONF_AUTO_RECONNECT_TIME,
+    CONF_INVERTER_SNS,
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_MAX_DATA_AGE,
     DEFAULT_STALE_CHECKS_THRESHOLD,
     DEFAULT_NOTIFY_ON_RECOVERY,
     DEFAULT_DIAGNOSTICS_MODE,
     DEFAULT_AUTO_RECONNECT_TIME,
+    DEFAULT_INVERTER_SNS,
     MAX_DIAGNOSTIC_LOGS,
     RECENT_DATA_THRESHOLD,
     STALE_DATA_THRESHOLD,
@@ -73,6 +77,11 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
         self._auto_reconnect_unsub = None
         self._webhook_id = None
         self._webhook_unsub = None
+        self._inverter_list = []  # Store discovered inverters
+        self._configured_control_variant = options.get(CONF_CONTROL_VARIANT, "auto")
+        self._configured_control_target_system_id = options.get(CONF_CONTROL_TARGET_SYSTEM_ID, "")
+        self._control_variant_info: Dict[str, Any] = {}
+        self._last_force_charge_diagnostics: Dict[str, Any] = {}
         
         # Connection health tracking
         self.circuit_breaker = CircuitBreaker()
@@ -177,18 +186,57 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
                     await self.client.api_client.async_get_battery_settings()
             except Exception as ex:
                 _LOGGER.warning(f"Failed to fetch battery settings: {ex}")
+
+            # Detect active control variant and collect control metadata.
+            try:
+                self._control_variant_info = await self.client.api_client.async_detect_control_variant(
+                    self._configured_control_variant
+                )
+                if self._configured_control_target_system_id:
+                    self._control_variant_info["target_system_id"] = self._configured_control_target_system_id
+                    self._control_variant_info["target_selection_source"] = "user_config"
+                if self._last_force_charge_diagnostics:
+                    self._control_variant_info.update(self._last_force_charge_diagnostics)
+                _LOGGER.info(
+                    "ByteWatt control variant: detected=%s effective=%s target_system_id=%s target_sys_sn=%s source=%s",
+                    self._control_variant_info.get("detected_variant"),
+                    self._control_variant_info.get("effective_variant"),
+                    self._control_variant_info.get("target_system_id"),
+                    self._control_variant_info.get("target_sys_sn"),
+                    self._control_variant_info.get("target_selection_source") or self._control_variant_info.get("variant_source"),
+                )
+            except Exception as ex:
+                _LOGGER.warning(f"Failed to detect control variant: {ex}")
+                self._control_variant_info = {
+                    "configured_variant": self._configured_control_variant,
+                    "detected_variant": "unknown",
+                    "effective_variant": self._configured_control_variant,
+                    "variant_source": "detection_error",
+                    "target_system_id": self._configured_control_target_system_id or None,
+                    "summary": str(ex),
+                }
+                if self._last_force_charge_diagnostics:
+                    self._control_variant_info.update(self._last_force_charge_diagnostics)
             
             # If we got battery data, update our cached version and last successful time
             if battery_data:
-                self._last_battery_data = battery_data
-                self._last_successful_update = current_time
-                self._consecutive_stale_checks = 0
-                self._recovery_attempts = 0  # Reset recovery attempts on successful update
-                
-                self.diagnostic_service.log_diagnostic("data_update", {
-                    "type": "battery_data",
-                    "result": "success"
-                })
+                if self._is_all_zero_payload(battery_data) and self._last_battery_data:
+                    _LOGGER.warning("Received all-zero ByteWatt payload, preserving cached data")
+                    self.diagnostic_service.log_diagnostic("data_update", {
+                        "type": "battery_data",
+                        "result": "all_zero_payload_using_cache"
+                    })
+                    battery_data = None
+                else:
+                    self._last_battery_data = battery_data
+                    self._last_successful_update = current_time
+                    self._consecutive_stale_checks = 0
+                    self._recovery_attempts = 0  # Reset recovery attempts on successful update
+                    
+                    self.diagnostic_service.log_diagnostic("data_update", {
+                        "type": "battery_data",
+                        "result": "success"
+                    })
             elif self._last_battery_data is None:
                 # Only raise error if we never got data
                 error_msg = "Failed to get battery data and no cached data available"
@@ -217,8 +265,33 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
                 "battery": self._last_battery_data or {},
                 "connection_status": "connected" if battery_data else "partial",
                 "circuit_breaker": self.circuit_breaker.state.value,
-                "last_updated": current_time.isoformat()
+                "last_updated": current_time.isoformat(),
+                "control_variant": self._control_variant_info,
             }
+            
+            # Get per-inverter data if configured or auto-discovered
+            # This runs less frequently to avoid excessive API calls
+            per_inverter_data = None
+            try:
+                # Get inverter list and per-inverter power data
+                inverter_list = await self.client.api_client.async_get_inverter_list()
+                if inverter_list:
+                    # Store inverter list for sensor setup
+                    self._inverter_list = inverter_list
+                    
+                    # Get SNs for power data
+                    inverter_sns = [inv.get("sysSn") for inv in inverter_list if inv.get("sysSn")]
+                    
+                    # Get per-inverter power data
+                    per_inverter_data = await self.client.api_client.async_get_per_inverter_data(inverter_sns)
+                    
+                    if per_inverter_data:
+                        data["inverters"] = per_inverter_data
+                        data["inverter_list"] = inverter_list
+                        
+                        _LOGGER.debug("Added per-inverter data for %d inverters", len(per_inverter_data))
+            except Exception as ex:
+                _LOGGER.warning(f"Failed to fetch per-inverter data: {ex}")
             
             _LOGGER.debug(f"Coordinator data refreshed with keys: {list(data.keys())}")
             return data
@@ -268,6 +341,30 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
                         _LOGGER.error(f"Traceback: {traceback.format_exc()}")
                     
                 raise UpdateFailed(f"Error communicating with API: {err}")
+
+    def _is_all_zero_payload(self, battery_data: Dict[str, Any]) -> bool:
+        """Detect suspicious all-zero payloads that should not overwrite cached data."""
+        keys = [
+            "pgrid",
+            "pload",
+            "pbat",
+            "ppv",
+            "soc",
+            "Total_House_Consumption",
+            "Grid_Power_Consumption",
+            "PV_Generated_Today",
+            "Consumed_Today",
+        ]
+        values = []
+        for key in keys:
+            if key not in battery_data:
+                continue
+            value = battery_data.get(key)
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return bool(values) and all(abs(value) < 1e-9 for value in values)
     
     async def start_heartbeat(self) -> None:
         """Start the heartbeat service to monitor and recover the integration."""
