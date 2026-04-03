@@ -43,6 +43,70 @@ toggle_diagnostics:
       selector:
         text:
 
+force_charge:
+  name: Force Charge
+  description: >-
+    Start ByteWatt force charge using the integration's internal API client.
+    If no system is specified, all detected ByteWatt systems are targeted.
+  fields:
+    limit:
+      name: Charge Limit
+      description: Target SOC limit percentage for force charge
+      required: false
+      example: 95
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+    charge_power:
+      name: Charge Power
+      description: Optional charge power in watts for the targeted system(s)
+      required: false
+      example: 5000
+      selector:
+        number:
+          min: 0
+          max: 50000
+          step: 100
+          unit_of_measurement: "W"
+    system_id:
+      name: System ID
+      description: Optional specific ByteWatt system ID to target
+      required: false
+      example: "z1fn6iB6DC37K2SAa2s"
+      selector:
+        text:
+    sys_sn:
+      name: Inverter Serial
+      description: Optional inverter serial number for per-inverter targeting
+      required: false
+      example: "25000SP2B5W00253"
+      selector:
+        text:
+
+stop_force_charge:
+  name: Stop Force Charge
+  description: >-
+    Stop active ByteWatt force charge using the integration's internal API client.
+    If no system is specified, all detected ByteWatt systems are targeted.
+  fields:
+    system_id:
+      name: System ID
+      description: Optional specific ByteWatt system ID to target
+      required: false
+      example: "z1fn6iB6DC37K2SAa2s"
+      selector:
+        text:
+    sys_sn:
+      name: Inverter Serial
+      description: Optional inverter serial number associated with the system target
+      required: false
+      example: "25000SP2B5W00253"
+      selector:
+        text:
+
 set_discharge_time:
   name: Set Discharge End Time
   description: Set the end time for battery discharge (legacy service)
@@ -166,10 +230,31 @@ update_battery_settings:
           max: 100
           step: 1
           unit_of_measurement: "%"
+
+update_cycle_strategy:
+  name: Update Cycle Strategy
+  description: >-
+    Update the active cycle-strategy charge/discharge schedule for host/follower style systems.
+    Use this when the control variant is detected as cycle_strategy.
+  fields:
+    start_charge:
+      name: Charge Start Time
+      description: Primary cycle charge start time (HH:MM)
+      example: "22:00"
+      required: false
+      selector:
+        time: {}
+    end_charge:
+      name: Charge End Time
+      description: Primary cycle charge end time (HH:MM)
+      example: "22:30"
+      required: false
+      selector:
+        time: {}
     charge_cap:
       name: Charge Cap
-      description: The maximum battery charge cap to maintain (1-100%)
-      example: 90
+      description: Charge target/cap percentage for the cycle charge window
+      example: 80
       required: false
       selector:
         number:
@@ -177,15 +262,131 @@ update_battery_settings:
           max: 100
           step: 1
           unit_of_measurement: "%"
+    charge_power:
+      name: Charge Power
+      description: Primary cycle charge power in watts
+      example: 5000
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 50000
+          step: 100
+          unit_of_measurement: "W"
+    charge_enabled:
+      name: Charge Enabled
+      description: Enable or disable cycle-strategy charge control
+      required: false
+      selector:
+        boolean: {}
+    start_discharge:
+      name: Discharge Start Time
+      description: Primary cycle discharge start time (HH:MM)
+      example: "16:00"
+      required: false
+      selector:
+        time: {}
+    end_discharge:
+      name: Discharge End Time
+      description: Primary cycle discharge end time (HH:MM)
+      example: "07:15"
+      required: false
+      selector:
+        time: {}
+    minimum_soc:
+      name: Minimum SOC
+      description: Minimum battery SOC for the cycle strategy
+      example: 10
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+    discharge_power:
+      name: Discharge Power
+      description: Primary cycle discharge power in watts
+      example: 5000
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 50000
+          step: 100
+          unit_of_measurement: "W"
+    discharge_enabled:
+      name: Discharge Enabled
+      description: Enable or disable cycle-strategy discharge control
+      required: false
+      selector:
+        boolean: {}
 
-force_reconnect:
-  name: Force Reconnect
-  description: Force reconnection to the ByteWatt API
-
-health_check:
-  name: Health Check
-  description: Run a comprehensive health check of the ByteWatt integration
-
-toggle_diagnostics:
-  name: Toggle Diagnostics
-  description: Enable or disable diagnostic logging for the ByteWatt integration
+set_cycle_day_schedule:
+  name: Set Cycle Day Schedule
+  description: >-
+    Replace the current day-based cycle strategy with explicit charge and/or discharge
+    window lists. Intended for forecast-driven rolling optimiser control.
+  fields:
+    charge_windows:
+      name: Charge windows JSON
+      description: JSON array of charge window objects with beginTime/endTime/chargeLimit/chargePower
+      example: >-
+        [{"beginTime":"22:00","endTime":"22:15","chargeLimit":80,"chargePower":5000,"sort":1,"weeks":[7,1,2,3,4,5,6],"feedMode":0,"equipGroupId":0,"feedPower":0}]
+      required: false
+      selector:
+        text:
+          multiline: true
+    discharge_windows:
+      name: Discharge windows JSON
+      description: JSON array of discharge window objects with beginTime/endTime/chargeLimit/chargePower
+      example: >-
+        [{"beginTime":"16:00","endTime":"16:15","chargeLimit":15,"chargePower":5000,"sort":1,"weeks":[7,1,2,3,4,5,6],"feedMode":0,"equipGroupId":0,"feedPower":0}]
+      required: false
+      selector:
+        text:
+          multiline: true
+    minimum_soc:
+      name: Minimum SOC
+      description: Default discharge reserve SOC for generated windows
+      example: 15
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+    charge_cap:
+      name: Charge Cap
+      description: Default charge cap for generated windows
+      example: 80
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+    charge_power:
+      name: Charge Power
+      description: Default charge power in watts
+      example: 5000
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 50000
+          step: 100
+          unit_of_measurement: "W"
+    discharge_power:
+      name: Discharge Power
+      description: Default discharge power in watts
+      example: 5000
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 50000
+          step: 100
+          unit_of_measurement: "W"

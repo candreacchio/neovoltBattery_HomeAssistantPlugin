@@ -222,8 +222,16 @@ class BatterySettingsAPI:
                               discharge_end_time=None,
                               charge_start_time=None,
                               charge_end_time=None,
+                              charge_start_time_2=None,
+                              charge_end_time_2=None,
+                              discharge_start_time_2=None,
+                              discharge_end_time_2=None,
                               minimum_soc=None,
                               charge_cap=None,
+                              ups_reserve=None,
+                              charge_mode_setting=None,
+                              export_limit_w1=None,
+                              export_limit_w2=None,
                               discharge_time_control=None,
                               grid_charging=None,
                               max_retries: int = 5, 
@@ -257,7 +265,11 @@ class BatterySettingsAPI:
         
         # Check if any changes were made
         if (discharge_start is None and discharge_end is None and 
-            charge_start is None and charge_end is None and min_soc is None and max_charge_cap is None and
+            charge_start is None and charge_end is None and
+            charge_start_time_2 is None and charge_end_time_2 is None and
+            discharge_start_time_2 is None and discharge_end_time_2 is None and
+            min_soc is None and max_charge_cap is None and ups_reserve is None and
+            charge_mode_setting is None and export_limit_w1 is None and export_limit_w2 is None and
             ctr_dis_value is None and grid_charge_value is None):
             _LOGGER.warning("No valid battery settings provided, nothing to update")
             return False
@@ -284,6 +296,22 @@ class BatterySettingsAPI:
         if charge_end is not None:
             settings.time_chae1a = charge_end
             _LOGGER.debug(f"Updating charge end time to {charge_end}")
+
+        if charge_start_time_2 is not None:
+            settings.time_chaf2a = sanitize_time_format(charge_start_time_2) or settings.time_chaf2a
+            _LOGGER.debug(f"Updating charge start time 2 to {settings.time_chaf2a}")
+
+        if charge_end_time_2 is not None:
+            settings.time_chae2a = sanitize_time_format(charge_end_time_2) or settings.time_chae2a
+            _LOGGER.debug(f"Updating charge end time 2 to {settings.time_chae2a}")
+
+        if discharge_start_time_2 is not None:
+            settings.time_disf2a = sanitize_time_format(discharge_start_time_2) or settings.time_disf2a
+            _LOGGER.debug(f"Updating discharge start time 2 to {settings.time_disf2a}")
+
+        if discharge_end_time_2 is not None:
+            settings.time_dise2a = sanitize_time_format(discharge_end_time_2) or settings.time_dise2a
+            _LOGGER.debug(f"Updating discharge end time 2 to {settings.time_dise2a}")
         
         if min_soc is not None:
             settings.bat_use_cap = min_soc
@@ -292,6 +320,34 @@ class BatterySettingsAPI:
         if max_charge_cap is not None:
             settings.bat_high_cap = str(max_charge_cap)
             _LOGGER.debug(f"Updating charge cap to {max_charge_cap}%")
+
+        if ups_reserve is not None:
+            try:
+                settings.additional_fields["upsReserve"] = int(ups_reserve)
+                _LOGGER.debug(f"Updating UPS reserve to {ups_reserve}")
+            except (ValueError, TypeError):
+                _LOGGER.error(f"Invalid ups_reserve value: {ups_reserve}")
+
+        if charge_mode_setting is not None:
+            try:
+                settings.additional_fields["chargeModeSetting"] = int(charge_mode_setting)
+                _LOGGER.debug(f"Updating charge mode setting to {charge_mode_setting}")
+            except (ValueError, TypeError):
+                _LOGGER.error(f"Invalid charge_mode_setting value: {charge_mode_setting}")
+
+        if export_limit_w1 is not None:
+            try:
+                settings.additional_fields["timeExpLimW1"] = int(export_limit_w1)
+                _LOGGER.debug(f"Updating export limit window 1 to {export_limit_w1}")
+            except (ValueError, TypeError):
+                _LOGGER.error(f"Invalid export_limit_w1 value: {export_limit_w1}")
+
+        if export_limit_w2 is not None:
+            try:
+                settings.additional_fields["timeExpLimW2"] = int(export_limit_w2)
+                _LOGGER.debug(f"Updating export limit window 2 to {export_limit_w2}")
+            except (ValueError, TypeError):
+                _LOGGER.error(f"Invalid export_limit_w2 value: {export_limit_w2}")
         
         if ctr_dis_value is not None:
             settings.ctr_dis = ctr_dis_value
