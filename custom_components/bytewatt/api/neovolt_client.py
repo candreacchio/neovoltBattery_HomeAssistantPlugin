@@ -693,3 +693,46 @@ class NeovoltClient:
         except Exception as error:
             _LOGGER.error("Error making PUT request: %s", error)
             return None
+
+    async def async_get_grid_feedin_settings(self):
+        """Fetch and cache grid feed-in settings."""
+        try:
+            from .settings import GridFeedInSettingsAPI
+            api = GridFeedInSettingsAPI(self)
+            if hasattr(self, "_grid_feedin_cache") and self._grid_feedin_cache:
+                api._cache = self._grid_feedin_cache
+            settings = await api.fetch_current_settings()
+            if settings:
+                self._grid_feedin_cache = settings
+            return settings
+        except Exception as error:
+            _LOGGER.error("Error fetching grid feed-in settings: %s", error)
+            return None
+
+    async def async_update_grid_feedin_settings(self,
+                                                enabled: bool = None,
+                                                cutoff_soc: float = None,
+                                                slot_index: int = None,
+                                                slot_start: str = None,
+                                                slot_end: str = None,
+                                                slot_power: int = None) -> bool:
+        """Update grid feed-in settings."""
+        try:
+            from .settings import GridFeedInSettingsAPI
+            api = GridFeedInSettingsAPI(self)
+            if hasattr(self, "_grid_feedin_cache") and self._grid_feedin_cache:
+                api._cache = self._grid_feedin_cache
+            result = await api.update_settings(
+                enabled=enabled,
+                cutoff_soc=cutoff_soc,
+                slot_index=slot_index,
+                slot_start=slot_start,
+                slot_end=slot_end,
+                slot_power=slot_power,
+            )
+            if result and api._cache:
+                self._grid_feedin_cache = api._cache
+            return result
+        except Exception as error:
+            _LOGGER.error("Error updating grid feed-in settings: %s", error)
+            return False
