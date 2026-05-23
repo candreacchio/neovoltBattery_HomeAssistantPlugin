@@ -24,6 +24,9 @@ async def async_setup_entry(
     """Set up Byte-Watt time entities from a config entry."""
     coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
 
+    from .grid_feedin import async_setup_time_entry as _feedin_setup
+    await _feedin_setup(hass, config_entry, async_add_entities)
+
     entities = [
         ByteWattChargeStartTime(coordinator, config_entry),
         ByteWattChargeEndTime(coordinator, config_entry),
@@ -99,8 +102,14 @@ class ByteWattChargeStartTime(ByteWattTimeEntity):
 
     @property
     def native_value(self) -> Optional[time]:
-        """Return the current charge start time."""
+        """Return pending value if staged, else current API cache value."""
         try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                val = pending.get_battery("charge_start_time")
+                if val is not None:
+                    return self._parse_time_string(val)
             client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
             if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
                 settings = client.api_client._settings_cache
@@ -111,18 +120,18 @@ class ByteWattChargeStartTime(ByteWattTimeEntity):
         return None
 
     async def async_set_value(self, value: time) -> None:
-        """Set the charge start time."""
+        """Stage charge start time in pending store."""
         try:
-            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
-            time_str = self._format_time_for_api(value)
-            success = await client.update_battery_settings(charge_start_time=time_str)
-            if success:
-                _LOGGER.info(f"Successfully updated charge start time to {time_str}")
-                await self.coordinator.async_request_refresh()
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                pending.set_battery(charge_start_time=self._format_time_for_api(value))
+                _LOGGER.debug("Staged charge_start_time=%s (pending submit)", value)
+                self.async_write_ha_state()
             else:
-                _LOGGER.error(f"Failed to update charge start time to {time_str}")
+                _LOGGER.error("No pending store found for charge start time")
         except Exception as ex:
-            _LOGGER.error(f"Error setting charge start time to {value}: {ex}")
+            _LOGGER.error(f"Error staging charge start time to {value}: {ex}")
 
 
 class ByteWattChargeEndTime(ByteWattTimeEntity):
@@ -143,8 +152,14 @@ class ByteWattChargeEndTime(ByteWattTimeEntity):
 
     @property
     def native_value(self) -> Optional[time]:
-        """Return the current charge end time."""
+        """Return pending value if staged, else current API cache value."""
         try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                val = pending.get_battery("charge_end_time")
+                if val is not None:
+                    return self._parse_time_string(val)
             client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
             if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
                 settings = client.api_client._settings_cache
@@ -155,18 +170,18 @@ class ByteWattChargeEndTime(ByteWattTimeEntity):
         return None
 
     async def async_set_value(self, value: time) -> None:
-        """Set the charge end time."""
+        """Stage charge end time in pending store."""
         try:
-            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
-            time_str = self._format_time_for_api(value)
-            success = await client.update_battery_settings(charge_end_time=time_str)
-            if success:
-                _LOGGER.info(f"Successfully updated charge end time to {time_str}")
-                await self.coordinator.async_request_refresh()
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                pending.set_battery(charge_end_time=self._format_time_for_api(value))
+                _LOGGER.debug("Staged charge_end_time=%s (pending submit)", value)
+                self.async_write_ha_state()
             else:
-                _LOGGER.error(f"Failed to update charge end time to {time_str}")
+                _LOGGER.error("No pending store found for charge end time")
         except Exception as ex:
-            _LOGGER.error(f"Error setting charge end time to {value}: {ex}")
+            _LOGGER.error(f"Error staging charge end time to {value}: {ex}")
 
 
 class ByteWattDischargeStartTime(ByteWattTimeEntity):
@@ -187,8 +202,14 @@ class ByteWattDischargeStartTime(ByteWattTimeEntity):
 
     @property
     def native_value(self) -> Optional[time]:
-        """Return the current discharge start time."""
+        """Return pending value if staged, else current API cache value."""
         try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                val = pending.get_battery("discharge_start_time")
+                if val is not None:
+                    return self._parse_time_string(val)
             client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
             if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
                 settings = client.api_client._settings_cache
@@ -199,18 +220,18 @@ class ByteWattDischargeStartTime(ByteWattTimeEntity):
         return None
 
     async def async_set_value(self, value: time) -> None:
-        """Set the discharge start time."""
+        """Stage discharge start time in pending store."""
         try:
-            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
-            time_str = self._format_time_for_api(value)
-            success = await client.update_battery_settings(discharge_start_time=time_str)
-            if success:
-                _LOGGER.info(f"Successfully updated discharge start time to {time_str}")
-                await self.coordinator.async_request_refresh()
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                pending.set_battery(discharge_start_time=self._format_time_for_api(value))
+                _LOGGER.debug("Staged discharge_start_time=%s (pending submit)", value)
+                self.async_write_ha_state()
             else:
-                _LOGGER.error(f"Failed to update discharge start time to {time_str}")
+                _LOGGER.error("No pending store found for discharge start time")
         except Exception as ex:
-            _LOGGER.error(f"Error setting discharge start time to {value}: {ex}")
+            _LOGGER.error(f"Error staging discharge start time to {value}: {ex}")
 
 
 class ByteWattDischargeEndTime(ByteWattTimeEntity):
@@ -231,8 +252,14 @@ class ByteWattDischargeEndTime(ByteWattTimeEntity):
 
     @property
     def native_value(self) -> Optional[time]:
-        """Return the current discharge end time."""
+        """Return pending value if staged, else current API cache value."""
         try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                val = pending.get_battery("discharge_end_time")
+                if val is not None:
+                    return self._parse_time_string(val)
             client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
             if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
                 settings = client.api_client._settings_cache
@@ -243,15 +270,15 @@ class ByteWattDischargeEndTime(ByteWattTimeEntity):
         return None
 
     async def async_set_value(self, value: time) -> None:
-        """Set the discharge end time."""
+        """Stage discharge end time in pending store."""
         try:
-            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
-            time_str = self._format_time_for_api(value)
-            success = await client.update_battery_settings(discharge_end_time=time_str)
-            if success:
-                _LOGGER.info(f"Successfully updated discharge end time to {time_str}")
-                await self.coordinator.async_request_refresh()
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                pending.set_battery(discharge_end_time=self._format_time_for_api(value))
+                _LOGGER.debug("Staged discharge_end_time=%s (pending submit)", value)
+                self.async_write_ha_state()
             else:
-                _LOGGER.error(f"Failed to update discharge end time to {time_str}")
+                _LOGGER.error("No pending store found for discharge end time")
         except Exception as ex:
-            _LOGGER.error(f"Error setting discharge end time to {value}: {ex}")
+            _LOGGER.error(f"Error staging discharge end time to {value}: {ex}")

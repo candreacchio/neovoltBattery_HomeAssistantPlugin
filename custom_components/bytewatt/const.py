@@ -90,3 +90,15 @@ RECENT_DATA_THRESHOLD = 300  # 5 minutes in seconds
 STALE_DATA_THRESHOLD = 3600  # 1 hour in seconds
 AUTO_RECONNECT_INTERVAL_HOURS = 24  # 24 hours
 HTTPS_PORT = 443
+
+# Grid Feed-in Control constants
+SERVICE_SET_GRID_FEEDIN_ENABLED = "set_grid_feedin_enabled"
+SERVICE_SET_GRID_FEEDIN_CUTOFF_SOC = "set_grid_feedin_cutoff_soc"
+SERVICE_UPDATE_GRID_FEEDIN_SLOT = "update_grid_feedin_slot"
+
+ATTR_FEEDIN_ENABLED = "feedin_enabled"
+ATTR_FEEDIN_CUTOFF_SOC = "feedin_cutoff_soc"
+ATTR_FEEDIN_SLOT = "slot"
+ATTR_FEEDIN_START = "start_time"
+ATTR_FEEDIN_END = "end_time"
+ATTR_FEEDIN_POWER = "power_watts"

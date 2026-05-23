@@ -52,3 +52,24 @@ class ByteWattClient:
             discharge_time_control=discharge_time_control,
             grid_charging=grid_charging
         )
+
+    async def get_grid_feedin_settings(self):
+        """Get grid feed-in settings."""
+        return await self.api_client.async_get_grid_feedin_settings()
+
+    async def update_grid_feedin_settings(self,
+                                          enabled: bool = None,
+                                          cutoff_soc: float = None,
+                                          slot_index: int = None,
+                                          slot_start: str = None,
+                                          slot_end: str = None,
+                                          slot_power: int = None) -> bool:
+        """Update grid feed-in settings."""
+        return await self.api_client.async_update_grid_feedin_settings(
+            enabled=enabled,
+            cutoff_soc=cutoff_soc,
+            slot_index=slot_index,
+            slot_start=slot_start,
+            slot_end=slot_end,
+            slot_power=slot_power,
+        )

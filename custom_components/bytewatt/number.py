@@ -23,6 +23,9 @@ async def async_setup_entry(
     """Set up Byte-Watt number entities from a config entry."""
     coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
 
+    from .grid_feedin import async_setup_number_entry as _feedin_setup
+    await _feedin_setup(hass, config_entry, async_add_entities)
+
     entities = [
         ByteWattChargeCapNumber(coordinator, config_entry),
         ByteWattMinimumSOCNumber(coordinator, config_entry),
@@ -92,8 +95,14 @@ class ByteWattMinimumSOCNumber(ByteWattNumberEntity):
 
     @property
     def native_value(self) -> Optional[float]:
-        """Return the current minimum SOC value."""
+        """Return pending value if staged, else current API cache value."""
         try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                val = pending.get_battery("minimum_soc")
+                if val is not None:
+                    return float(val)
             client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
             if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
                 settings = client.api_client._settings_cache
@@ -103,18 +112,18 @@ class ByteWattMinimumSOCNumber(ByteWattNumberEntity):
         return None
 
     async def async_set_native_value(self, value: float) -> None:
-        """Set the minimum SOC value."""
+        """Stage minimum SOC in pending store."""
         try:
-            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
-            success = await client.update_battery_settings(minimum_soc=int(value))
-            if success:
-                _LOGGER.info(f"Successfully updated minimum SOC to {value}%")
-                # Trigger coordinator refresh to update other entities
-                await self.coordinator.async_request_refresh()
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                pending.set_battery(minimum_soc=int(value))
+                _LOGGER.debug("Staged minimum_soc=%s (pending submit)", int(value))
+                self.async_write_ha_state()
             else:
-                _LOGGER.error(f"Failed to update minimum SOC to {value}%")
+                _LOGGER.error("No pending store found for minimum SOC")
         except Exception as ex:
-            _LOGGER.error(f"Error setting minimum SOC to {value}%: {ex}")
+            _LOGGER.error(f"Error staging minimum SOC to {value}%: {ex}")
 
 
 class ByteWattChargeCapNumber(ByteWattNumberEntity):
@@ -139,8 +148,14 @@ class ByteWattChargeCapNumber(ByteWattNumberEntity):
 
     @property
     def native_value(self) -> Optional[float]:
-        """Return the current charge cap value."""
+        """Return pending value if staged, else current API cache value."""
         try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                val = pending.get_battery("charge_cap")
+                if val is not None:
+                    return float(val)
             client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
             if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
                 settings = client.api_client._settings_cache
@@ -151,15 +166,15 @@ class ByteWattChargeCapNumber(ByteWattNumberEntity):
         return None
 
     async def async_set_native_value(self, value: float) -> None:
-        """Set the charge cap value."""
+        """Stage charge cap in pending store."""
         try:
-            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
-            success = await client.update_battery_settings(charge_cap=int(value))
-            if success:
-                _LOGGER.info(f"Successfully updated charge cap to {value}%")
-                # Trigger coordinator refresh to update other entities
-                await self.coordinator.async_request_refresh()
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                pending.set_battery(charge_cap=int(value))
+                _LOGGER.debug("Staged charge_cap=%s (pending submit)", int(value))
+                self.async_write_ha_state()
             else:
-                _LOGGER.error(f"Failed to update charge cap to {value}%")
+                _LOGGER.error("No pending store found for charge cap")
         except Exception as ex:
-            _LOGGER.error(f"Error setting charge cap to {value}%: {ex}")
+            _LOGGER.error(f"Error staging charge cap to {value}%: {ex}")

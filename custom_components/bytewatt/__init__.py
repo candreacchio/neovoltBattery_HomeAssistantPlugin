@@ -11,6 +11,7 @@ import homeassistant.helpers.config_validation as cv
 
 from .bytewatt_client import ByteWattClient
 from .coordinator import ByteWattDataUpdateCoordinator
+from .pending import PendingStore
 from .const import (
     DOMAIN,
     CONF_USERNAME,
@@ -47,13 +48,22 @@ from .const import (
     ATTR_END_CHARGE,
     ATTR_MINIMUM_SOC,
     ATTR_CHARGE_CAP,
+    SERVICE_SET_GRID_FEEDIN_ENABLED,
+    SERVICE_SET_GRID_FEEDIN_CUTOFF_SOC,
+    SERVICE_UPDATE_GRID_FEEDIN_SLOT,
+    ATTR_FEEDIN_ENABLED,
+    ATTR_FEEDIN_CUTOFF_SOC,
+    ATTR_FEEDIN_SLOT,
+    ATTR_FEEDIN_START,
+    ATTR_FEEDIN_END,
+    ATTR_FEEDIN_POWER,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-PLATFORMS = ["sensor", "number", "time", "switch"]
+PLATFORMS = ["sensor", "number", "time", "switch", "button"]
 
 async def async_setup(hass: HomeAssistant, config: dict):
     """Set up the Byte-Watt component."""
@@ -95,6 +105,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data[DOMAIN][entry.entry_id] = {
         "client": client,
         "coordinator": coordinator,
+        "pending": PendingStore(),
     }
 
     # Start the heartbeat monitoring service if enabled
@@ -110,6 +121,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     # Setup platforms - use the newer async_forward_entry_setups to avoid deprecation warning
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Register grid feed-in entities directly now that hass.data is populated
+
 
     return True
 
@@ -571,5 +585,70 @@ async def register_battery_services(hass: HomeAssistant, client: ByteWattClient,
         schema=vol.Schema({
             vol.Optional('enable'): cv.boolean,
             vol.Optional('entry_id'): cv.string
+        })
+    )
+
+    # Grid feed-in services
+    async def handle_set_grid_feedin_enabled(call: ServiceCall):
+        """Handle enabling/disabling grid feed-in function."""
+        enabled = call.data.get(ATTR_FEEDIN_ENABLED)
+        if enabled is None:
+            _LOGGER.error("No feedin_enabled value provided")
+            return
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            c = hass.data[DOMAIN][entry.entry_id]["client"]
+            await c.update_grid_feedin_settings(enabled=enabled)
+
+    async def handle_set_grid_feedin_cutoff_soc(call: ServiceCall):
+        """Handle setting grid feed-in discharging cutoff SOC."""
+        cutoff_soc = call.data.get(ATTR_FEEDIN_CUTOFF_SOC)
+        if cutoff_soc is None:
+            _LOGGER.error("No feedin_cutoff_soc value provided")
+            return
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            c = hass.data[DOMAIN][entry.entry_id]["client"]
+            await c.update_grid_feedin_settings(cutoff_soc=int(cutoff_soc))
+
+    async def handle_update_grid_feedin_slot(call: ServiceCall):
+        """Handle updating a grid feed-in time slot."""
+        slot = call.data.get(ATTR_FEEDIN_SLOT)
+        if slot is None:
+            _LOGGER.error("No slot number provided")
+            return
+        slot_index = int(slot) - 1  # convert 1-based to 0-based
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            c = hass.data[DOMAIN][entry.entry_id]["client"]
+            await c.update_grid_feedin_settings(
+                slot_index=slot_index,
+                slot_start=call.data.get(ATTR_FEEDIN_START),
+                slot_end=call.data.get(ATTR_FEEDIN_END),
+                slot_power=call.data.get(ATTR_FEEDIN_POWER),
+            )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_GRID_FEEDIN_ENABLED,
+        handle_set_grid_feedin_enabled,
+        schema=vol.Schema({vol.Required(ATTR_FEEDIN_ENABLED): cv.boolean})
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_GRID_FEEDIN_CUTOFF_SOC,
+        handle_set_grid_feedin_cutoff_soc,
+        schema=vol.Schema({
+            vol.Required(ATTR_FEEDIN_CUTOFF_SOC): vol.All(vol.Coerce(int), vol.Range(min=0, max=100))
+        })
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_UPDATE_GRID_FEEDIN_SLOT,
+        handle_update_grid_feedin_slot,
+        schema=vol.Schema({
+            vol.Required(ATTR_FEEDIN_SLOT): vol.All(vol.Coerce(int), vol.Range(min=1, max=6)),
+            vol.Optional(ATTR_FEEDIN_START): cv.string,
+            vol.Optional(ATTR_FEEDIN_END): cv.string,
+            vol.Optional(ATTR_FEEDIN_POWER): vol.All(vol.Coerce(int), vol.Range(min=0, max=20000)),
         })
     )

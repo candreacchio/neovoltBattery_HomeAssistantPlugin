@@ -1,17 +1,13 @@
-# Service definitions for the Byte-Watt integration
-
 force_reconnect:
   name: Force Reconnect
   description: >-
     Force the ByteWatt integration to reconnect to the API when it appears to be stuck.
-    Use this service if your ByteWatt integration has stopped updating and shows stale data.
     This will reset the client connection, authenticate again, and refresh all sensor data.
 
 health_check:
   name: Health Check
   description: >-
     Run a comprehensive health check on the ByteWatt integration.
-    This will check network connectivity, authentication, and API accessibility.
     Results will be displayed in a persistent notification.
   fields:
     entry_id:
@@ -26,11 +22,10 @@ toggle_diagnostics:
   name: Toggle Diagnostics
   description: >-
     Enable or disable detailed diagnostic logging for the ByteWatt integration.
-    When enabled, detailed logs will be collected about API operations, errors, and recovery attempts.
   fields:
     enable:
       name: Enable
-      description: Set to true to enable diagnostics, false to disable (toggles current state if not provided)
+      description: Set to true to enable diagnostics, false to disable
       required: false
       example: true
       selector:
@@ -178,14 +173,70 @@ update_battery_settings:
           step: 1
           unit_of_measurement: "%"
 
-force_reconnect:
-  name: Force Reconnect
-  description: Force reconnection to the ByteWatt API
+set_grid_feedin_enabled:
+  name: Set Grid Feed-in Enabled
+  description: Enable or disable the Grid Feed-in Function
+  fields:
+    feedin_enabled:
+      name: Enabled
+      description: Set to true to enable, false to disable
+      required: true
+      example: true
+      selector:
+        boolean:
 
-health_check:
-  name: Health Check
-  description: Run a comprehensive health check of the ByteWatt integration
+set_grid_feedin_cutoff_soc:
+  name: Set Grid Feed-in Cutoff SOC
+  description: Set the discharging cutoff state-of-charge for grid feed-in
+  fields:
+    feedin_cutoff_soc:
+      name: Cutoff SOC
+      description: Battery percentage at which grid feed-in stops discharging (0-100%)
+      required: true
+      example: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
 
-toggle_diagnostics:
-  name: Toggle Diagnostics
-  description: Enable or disable diagnostic logging for the ByteWatt integration
+update_grid_feedin_slot:
+  name: Update Grid Feed-in Slot
+  description: Update the grid feed-in Time1 slot (start time, end time, and/or power).
+  fields:
+    slot:
+      name: Slot Number
+      description: Time slot number (always 1 for Time Period 1)
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 1
+          step: 1
+    start_time:
+      name: Start Time
+      description: Slot start time (HH:MM)
+      required: false
+      example: "17:00"
+      selector:
+        time: {}
+    end_time:
+      name: End Time
+      description: Slot end time (HH:MM)
+      required: false
+      example: "21:00"
+      selector:
+        time: {}
+    power_watts:
+      name: Grid Feed-in Power (W)
+      description: Maximum grid feed-in power in watts
+      required: false
+      example: 4000
+      selector:
+        number:
+          min: 0
+          max: 20000
+          step: 100
+          unit_of_measurement: "W"

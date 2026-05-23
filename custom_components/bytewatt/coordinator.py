@@ -177,6 +177,12 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
                     await self.client.api_client.async_get_battery_settings()
             except Exception as ex:
                 _LOGGER.warning(f"Failed to fetch battery settings: {ex}")
+
+            # Get grid feed-in settings (don't fail if this fails)
+            try:
+                await self.client.api_client.async_get_grid_feedin_settings()
+            except Exception as ex:
+                _LOGGER.warning(f"Failed to fetch grid feed-in settings: {ex}")
             
             # If we got battery data, update our cached version and last successful time
             if battery_data:

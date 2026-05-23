@@ -23,6 +23,9 @@ async def async_setup_entry(
     """Set up Byte-Watt switch entities from a config entry."""
     coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
 
+    from .grid_feedin import async_setup_switch_entry as _feedin_setup
+    await _feedin_setup(hass, config_entry, async_add_entities)
+
     entities = [
         ByteWattGridChargeSwitch(coordinator, config_entry),
         ByteWattDischargeControlSwitch(coordinator, config_entry),
@@ -65,14 +68,22 @@ class ByteWattSwitchEntity(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self) -> Optional[bool]:
-        """Return true if the switch is on."""
+        """Return true if the switch is on, checking pending store first."""
         try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            # Check pending store first
+            pending_key = "discharge_time_control" if self._attribute == "ctr_dis" else "grid_charging"
+            if pending is not None:
+                pending_val = pending.get_battery(pending_key)
+                if pending_val is not None:
+                    return bool(pending_val)
+            # Fall back to API cache
             client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
             if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
                 settings = client.api_client._settings_cache
                 value = getattr(settings, self._attribute, None)
                 if value is not None:
-                    # Convert API integer (0/1) to boolean
                     return bool(int(value))
         except (ValueError, TypeError, AttributeError) as ex:
             _LOGGER.debug(f"Error getting {self._attr_name} state: {ex}")
@@ -118,24 +129,18 @@ class ByteWattDischargeControlSwitch(ByteWattSwitchEntity):
         )
 
     async def _async_set_state(self, state: bool) -> None:
-        """Set the discharge control state."""
+        """Stage the discharge control state in pending store."""
         try:
-            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
-            
-            # Use the client's update method with the discharge_time_control parameter
-            success = await client.update_battery_settings(discharge_time_control=state)
-            
-            if success:
-                action = "enabled" if state else "disabled"
-                _LOGGER.info(f"Successfully {action} discharge time control")
-                # Trigger coordinator refresh to update other entities
-                await self.coordinator.async_request_refresh()
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                pending.set_battery(discharge_time_control=state)
+                _LOGGER.debug("Staged discharge_time_control=%s (pending submit)", state)
+                self.async_write_ha_state()
             else:
-                action = "enable" if state else "disable"
-                _LOGGER.error(f"Failed to {action} discharge time control")
+                _LOGGER.error("No pending store found for discharge time control")
         except Exception as ex:
-            action = "enable" if state else "disable"
-            _LOGGER.error(f"Error trying to {action} discharge time control: {ex}")
+            _LOGGER.error(f"Error staging discharge time control: {ex}")
 
 
 class ByteWattGridChargeSwitch(ByteWattSwitchEntity):
@@ -155,21 +160,15 @@ class ByteWattGridChargeSwitch(ByteWattSwitchEntity):
         )
 
     async def _async_set_state(self, state: bool) -> None:
-        """Set the grid charging state."""
+        """Stage the grid charging state in pending store."""
         try:
-            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
-            
-            # Use the client's update method with the grid_charging parameter
-            success = await client.update_battery_settings(grid_charging=state)
-            
-            if success:
-                action = "enabled" if state else "disabled"
-                _LOGGER.info(f"Successfully {action} grid charging")
-                # Trigger coordinator refresh to update other entities
-                await self.coordinator.async_request_refresh()
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                pending.set_battery(grid_charging=state)
+                _LOGGER.debug("Staged grid_charging=%s (pending submit)", state)
+                self.async_write_ha_state()
             else:
-                action = "enable" if state else "disable"
-                _LOGGER.error(f"Failed to {action} grid charging")
+                _LOGGER.error("No pending store found for grid charging")
         except Exception as ex:
-            action = "enable" if state else "disable"
-            _LOGGER.error(f"Error trying to {action} grid charging: {ex}")
+            _LOGGER.error(f"Error staging grid charging: {ex}")
