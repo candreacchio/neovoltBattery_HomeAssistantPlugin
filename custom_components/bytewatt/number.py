@@ -29,6 +29,8 @@ async def async_setup_entry(
     entities = [
         ByteWattChargeCapNumber(coordinator, config_entry),
         ByteWattMinimumSOCNumber(coordinator, config_entry),
+        ByteWattChargePowerNumber(coordinator, config_entry),
+        ByteWattDischargePowerNumber(coordinator, config_entry),
     ]
 
     async_add_entities(entities)
@@ -178,3 +180,104 @@ class ByteWattChargeCapNumber(ByteWattNumberEntity):
                 _LOGGER.error("No pending store found for charge cap")
         except Exception as ex:
             _LOGGER.error(f"Error staging charge cap to {value}%: {ex}")
+
+class ByteWattChargePowerNumber(ByteWattNumberEntity):
+    """Number entity for battery charge power rate."""
+
+    def __init__(
+        self, coordinator: ByteWattDataUpdateCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(
+            coordinator=coordinator,
+            config_entry=config_entry,
+            name="Battery Charge Power",
+            unique_id="charge_power",
+            icon="mdi:battery-charging-high",
+            min_value=500,
+            max_value=10000,
+            step=100,
+            device_class=NumberDeviceClass.POWER,
+        )
+        self._attr_native_unit_of_measurement = "W"
+
+    @property
+    def native_value(self) -> Optional[float]:
+        try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                val = pending.get_battery("charge_power")
+                if val is not None:
+                    return float(val)
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
+                settings = client.api_client._settings_cache
+                if settings.charge_slots:
+                    return float(settings.charge_slots[0].charge_power)
+        except (ValueError, TypeError, AttributeError) as ex:
+            _LOGGER.debug(f"Error getting charge power value: {ex}")
+        return None
+
+    async def async_set_native_value(self, value: float) -> None:
+        try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                pending.set_battery(charge_power=int(value))
+                _LOGGER.debug("Staged charge_power=%sW (pending submit)", int(value))
+                self.async_write_ha_state()
+            else:
+                _LOGGER.error("No pending store found for charge power")
+        except Exception as ex:
+            _LOGGER.error(f"Error staging charge power to {value}W: {ex}")
+
+
+class ByteWattDischargePowerNumber(ByteWattNumberEntity):
+    """Number entity for battery discharge power rate."""
+
+    def __init__(
+        self, coordinator: ByteWattDataUpdateCoordinator, config_entry: ConfigEntry
+    ) -> None:
+        super().__init__(
+            coordinator=coordinator,
+            config_entry=config_entry,
+            name="Battery Discharge Power",
+            unique_id="discharge_power",
+            icon="mdi:battery-minus",
+            min_value=500,
+            max_value=10000,
+            step=100,
+            device_class=NumberDeviceClass.POWER,
+        )
+        self._attr_native_unit_of_measurement = "W"
+
+    @property
+    def native_value(self) -> Optional[float]:
+        try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                val = pending.get_battery("discharge_power")
+                if val is not None:
+                    return float(val)
+            client = self.hass.data[DOMAIN][self._config_entry.entry_id]["client"]
+            if hasattr(client.api_client, "_settings_cache") and client.api_client._settings_cache:
+                settings = client.api_client._settings_cache
+                if settings.discharge_slots:
+                    return float(settings.discharge_slots[0].charge_power)
+        except (ValueError, TypeError, AttributeError) as ex:
+            _LOGGER.debug(f"Error getting discharge power value: {ex}")
+        return None
+
+    async def async_set_native_value(self, value: float) -> None:
+        try:
+            from .pending import get_pending
+            pending = get_pending(self.hass, self._config_entry.entry_id)
+            if pending is not None:
+                pending.set_battery(discharge_power=int(value))
+                _LOGGER.debug("Staged discharge_power=%sW (pending submit)", int(value))
+                self.async_write_ha_state()
+            else:
+                _LOGGER.error("No pending store found for discharge power")
+        except Exception as ex:
+            _LOGGER.error(f"Error staging discharge power to {value}W: {ex}")
