@@ -25,6 +25,8 @@ class NeovoltClient:
         username: str, 
         password: str, 
         base_url: str = DEFAULT_BASE_URL,
+        host_system_id: str = "",
+        host_sys_sn: str = "",
     ) -> None:
         """Initialize the API client."""
         self.hass = hass
@@ -36,6 +38,9 @@ class NeovoltClient:
         self._settings_cache = None
         self._fresh_settings_update = False
         self._settings_update_time = None
+        self.host_system_id = host_system_id   # systemId of the Host inverter
+        self.host_sys_sn = host_sys_sn         # sysSn of the Host inverter
+        self._inverter_list_cache = []          # cached from getCustomMenuEssList
     
     async def async_login(self) -> bool:
         """Login to the Neovolt API using encrypted password."""

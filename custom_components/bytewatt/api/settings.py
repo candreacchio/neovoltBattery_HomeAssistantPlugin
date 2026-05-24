@@ -185,11 +185,28 @@ class GridFeedInSettingsAPI:
         self._cache = None
 
     async def _get_system_id(self) -> str:
+        """Return the configured Host inverter systemId.
+
+        Uses the value set during config flow setup. Falls back to fetching
+        the list and picking the first entry for single-inverter setups or
+        legacy configs that predate the inverter selection step.
+        """
+        # Use the pre-configured value if available
+        if getattr(self.api_client, "host_system_id", ""):
+            return self.api_client.host_system_id
+
+        # Fallback: fetch list and take first entry (single inverter or legacy)
+        _LOGGER.warning(
+            "No host_system_id configured — fetching inverter list and using first entry. "
+            "Re-configure the integration to select the correct Host inverter."
+        )
         response = await self.api_client._async_get(self.SYSTEM_LIST_ENDPOINT)
         if response and response.get("code") == 200:
             data = response.get("data") or []
             if data:
-                return data[0].get("systemId", "")
+                system_id = data[0].get("systemId", "")
+                _LOGGER.warning("Using systemId=%s as fallback", system_id)
+                return system_id
         _LOGGER.error("Could not resolve systemId for grid feed-in")
         return ""
 
