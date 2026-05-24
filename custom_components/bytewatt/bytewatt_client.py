@@ -13,12 +13,17 @@ _LOGGER = logging.getLogger(__name__)
 class ByteWattClient:
     """Client for interacting with the Byte-Watt API."""
     
-    def __init__(self, hass: HomeAssistant, username: str, password: str):
+    def __init__(self, hass: HomeAssistant, username: str, password: str,
+                 host_system_id: str = "", host_sys_sn: str = ""):
         """Initialize with login credentials."""
         self.hass = hass
         self.username = username
         self.password = password
-        self.api_client = NeovoltClient(hass, username, password)
+        self.api_client = NeovoltClient(
+            hass, username, password,
+            host_system_id=host_system_id,
+            host_sys_sn=host_sys_sn,
+        )
     
     async def initialize(self) -> bool:
         """Initialize or re-initialize the client."""
@@ -51,25 +56,4 @@ class ByteWattClient:
             charge_cap=charge_cap,
             discharge_time_control=discharge_time_control,
             grid_charging=grid_charging
-        )
-
-    async def get_grid_feedin_settings(self):
-        """Get grid feed-in settings."""
-        return await self.api_client.async_get_grid_feedin_settings()
-
-    async def update_grid_feedin_settings(self,
-                                          enabled: bool = None,
-                                          cutoff_soc: float = None,
-                                          slot_index: int = None,
-                                          slot_start: str = None,
-                                          slot_end: str = None,
-                                          slot_power: int = None) -> bool:
-        """Update grid feed-in settings."""
-        return await self.api_client.async_update_grid_feedin_settings(
-            enabled=enabled,
-            cutoff_soc=cutoff_soc,
-            slot_index=slot_index,
-            slot_start=slot_start,
-            slot_end=slot_end,
-            slot_power=slot_power,
         )

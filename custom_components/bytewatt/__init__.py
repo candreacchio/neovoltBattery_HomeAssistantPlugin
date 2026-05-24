@@ -57,6 +57,8 @@ from .const import (
     ATTR_FEEDIN_START,
     ATTR_FEEDIN_END,
     ATTR_FEEDIN_POWER,
+    CONF_HOST_SYSTEM_ID,
+    CONF_HOST_SYS_SN,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -90,7 +92,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         CONF_AUTO_RECONNECT_TIME: options.get(CONF_AUTO_RECONNECT_TIME, DEFAULT_AUTO_RECONNECT_TIME)
     }
 
-    client = ByteWattClient(hass, username, password)
+    client = ByteWattClient(
+        hass, username, password,
+        host_system_id=entry.data.get(CONF_HOST_SYSTEM_ID, ""),
+        host_sys_sn=entry.data.get(CONF_HOST_SYS_SN, ""),
+    )
 
     coordinator = ByteWattDataUpdateCoordinator(
         hass,

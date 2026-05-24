@@ -1,0 +1,27 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Byte-Watt Login",
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "scan_interval": "Scan Interval (seconds)"
+        }
+      },
+      "select_inverter": {
+        "title": "Select Host Inverter",
+        "description": "Multiple inverters were found on your account. Please select the Host inverter to use for Grid Feed-in control.",
+        "data": {
+          "host_system_id": "Multiple inverters found — please select the Host inverter for controls"
+        }
+      }
+    },
+    "error": {
+      "auth": "Invalid credentials. Please check your username and password."
+    },
+    "abort": {
+      "already_configured": "This Byte-Watt account is already configured."
+    }
+  }
+}

@@ -102,3 +102,7 @@ ATTR_FEEDIN_SLOT = "slot"
 ATTR_FEEDIN_START = "start_time"
 ATTR_FEEDIN_END = "end_time"
 ATTR_FEEDIN_POWER = "power_watts"
+
+# Host inverter selection
+CONF_HOST_SYSTEM_ID = "host_system_id"
+CONF_HOST_SYS_SN = "host_sys_sn"
