@@ -538,16 +538,13 @@ class NeovoltClient:
                                           minimum_soc: int = None,
                                           charge_cap: int = None,
                                           discharge_time_control: bool = None,
-                                          grid_charging: bool = None) -> bool:
+                                          grid_charging: bool = None,
+                                          charge_power: int = None,
+                                          discharge_power: int = None) -> bool:
         """Update battery settings."""
         try:
-            # Import the settings API
             from .settings import BatterySettingsAPI
-            
-            # Create settings API instance
             settings_api = BatterySettingsAPI(self)
-            
-            # Use the async method directly
             result = await settings_api.update_battery_settings(
                 discharge_start_time,
                 discharge_end_time,
@@ -556,7 +553,9 @@ class NeovoltClient:
                 minimum_soc,
                 charge_cap,
                 discharge_time_control,
-                grid_charging
+                grid_charging,
+                charge_power,
+                discharge_power,
             )
             
             # If successful, set fresh update flag and schedule auto-fetch from API

@@ -29,14 +29,19 @@ class BatterySettingsAPI:
         self._settings_cache: Optional[CycleStrategy] = None
         self._settings_loaded = False
 
+    def _host_id(self) -> str:
+        """Return the configured host systemId, or empty string for single-inverter setups."""
+        return getattr(self.api_client, "host_system_id", "")
+
     # ------------------------------------------------------------------
     # Fetch
     # ------------------------------------------------------------------
 
     async def fetch_current_settings(self, max_retries: int = 3, retry_delay: int = 1) -> Optional[CycleStrategy]:
         """Fetch cycle strategy from the API and cache it."""
+        endpoint = f"{self.GET_ENDPOINT}{self._host_id()}"
         for attempt in range(max_retries):
-            response = await self.api_client._async_get(self.GET_ENDPOINT)
+            response = await self.api_client._async_get(endpoint)
 
             if not response:
                 if attempt < max_retries - 1:
@@ -46,15 +51,17 @@ class BatterySettingsAPI:
             if response.get("code") == 6069:
                 _LOGGER.warning("Session expired fetching cycle strategy, re-logging in")
                 if await self.api_client.async_login():
-                    response = await self.api_client._async_get(self.GET_ENDPOINT)
+                    response = await self.api_client._async_get(endpoint)
 
             if response and response.get("code") == 200 and "data" in response:
                 settings = CycleStrategy.from_api_response(response["data"])
                 settings.last_updated = dt_util.utcnow().isoformat()
+                settings.host_system_id = self._host_id()  # store so to_dict can use it
                 self._settings_cache = settings
                 self._settings_loaded = True
                 _LOGGER.debug(
-                    "Fetched cycle strategy: charge=%s-%s, discharge=%s-%s, batUseCap=%.0f%%",
+                    "Fetched cycle strategy (id=%s): charge=%s-%s, discharge=%s-%s, batUseCap=%.0f%%",
+                    self._host_id(),
                     settings.time_chaf1a, settings.time_chae1a,
                     settings.time_disf1a, settings.time_dise1a,
                     settings.bat_use_cap,
@@ -89,12 +96,13 @@ class BatterySettingsAPI:
                                       charge_cap: int = None,
                                       discharge_time_control: bool = None,
                                       grid_charging: bool = None,
+                                      charge_power: int = None,
+                                      discharge_power: int = None,
                                       max_retries: int = 5,
                                       retry_delay: int = 1) -> bool:
         """Merge changes into current settings and PUT to the API."""
         current = await self.get_current_settings()
 
-        # Apply time changes via the alias properties
         if charge_start_time:
             sanitized = sanitize_time_format(charge_start_time)
             if sanitized:
@@ -127,12 +135,20 @@ class BatterySettingsAPI:
         if grid_charging is not None:
             current.grid_charge_cycle = 1 if grid_charging else 0
 
+        if charge_power is not None and current.charge_slots:
+            current.charge_slots[0].charge_power = int(charge_power)
+
+        if discharge_power is not None and current.discharge_slots:
+            current.discharge_slots[0].charge_power = int(discharge_power)
+
         return await self._send_settings(current, max_retries, retry_delay)
 
     async def _send_settings(self, settings: CycleStrategy,
                              max_retries: int = 5, retry_delay: int = 1) -> bool:
         """PUT settings to the API."""
         payload = settings.to_dict()
+        # Always use the configured host systemId in the payload
+        payload["id"] = self._host_id()
 
         for attempt in range(max_retries):
             response = await self.api_client._async_put(self.PUT_ENDPOINT, payload)
