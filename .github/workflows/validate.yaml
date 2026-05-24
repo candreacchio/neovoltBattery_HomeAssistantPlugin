@@ -7,14 +7,53 @@ on:
     - cron: "0 0 * * *"
 
 jobs:
-  validate:
-    runs-on: "ubuntu-latest"
+  hacs:
+    name: HACS validation
+    runs-on: ubuntu-latest
     steps:
-      - uses: "actions/checkout@v3"
-      - name: HACS validation
-        uses: "hacs/action@main"
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
         with:
-          category: "integration"
-          ignore: "brands"
-      - name: Hassfest validation
-        uses: "home-assistant/actions/hassfest@master"
+          category: integration
+          ignore: brands
+
+  hassfest:
+    name: Hassfest validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  syntax:
+    name: Syntax + manifest + services.yaml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install validators
+        run: pip install --quiet pyyaml
+      - name: Compile-check every .py file
+        run: python -m compileall -q custom_components/ scripts/ tests/
+      - name: Validate JSON files
+        run: |
+          python -c "import json; json.load(open('custom_components/bytewatt/manifest.json'))"
+          python -c "import json; json.load(open('custom_components/bytewatt/strings.json'))"
+          python -c "import json; json.load(open('custom_components/bytewatt/translations/en.json'))"
+          python -c "import json; json.load(open('hacs.json'))"
+      - name: Validate services.yaml
+        run: python -c "import yaml; yaml.safe_load(open('custom_components/bytewatt/services.yaml'))"
+
+  pytest:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install --quiet -r requirements_test.txt
+      - name: Run pytest
+        run: pytest -q --tb=short

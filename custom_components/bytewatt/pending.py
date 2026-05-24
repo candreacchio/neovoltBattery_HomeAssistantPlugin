@@ -1,214 +1,166 @@
-"""Pending settings store and Submit button for the Byte-Watt integration.
-
-All setting entities write their changes here instead of calling the API
-immediately.  The ByteWattSubmitButton entity pushes everything to the API
-in one shot, then clears the pending store on success or discards it on
-failure (reverting entities to the last known-good API cache values).
-"""
+"""Submit and Discard button entities for staged settings changes."""
 from __future__ import annotations
 
-import copy
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from homeassistant.components.button import ButtonEntity
+from homeassistant.components.persistent_notification import async_create as notify_create
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
-from .coordinator import ByteWattDataUpdateCoordinator
+from .const import DOMAIN, signal_pending_changed
+from .settings_manager import SettingsManager
 
 _LOGGER = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Pending store — one instance per config entry, stored in hass.data
-# ---------------------------------------------------------------------------
+def _manager(hass: HomeAssistant, entry_id: str) -> SettingsManager:
+    return hass.data[DOMAIN][entry_id]["manager"]
 
-class PendingStore:
-    """Holds unsaved changes for battery and grid feed-in settings."""
-
-    def __init__(self):
-        # Battery settings pending changes — keyed by kwarg name used in
-        # client.update_battery_settings()
-        self._battery: Dict[str, Any] = {}
-
-        # Grid feed-in pending changes — mirrors the kwargs for
-        # client.update_grid_feedin_settings(), except slot changes are
-        # stored as a dict keyed by slot_index.
-        self._feedin: Dict[str, Any] = {}
-        self._feedin_slots: Dict[int, Dict[str, Any]] = {}
-
-    # --- battery ---
-
-    def set_battery(self, **kwargs) -> None:
-        """Stage a battery setting change."""
-        self._battery.update({k: v for k, v in kwargs.items() if v is not None})
-
-    def get_battery(self, key: str, default=None):
-        """Return a pending battery value if staged, else default."""
-        return self._battery.get(key, default)
-
-    def has_battery_pending(self) -> bool:
-        return bool(self._battery)
-
-    # --- grid feed-in ---
-
-    def set_feedin(self, enabled: bool = None, cutoff_soc: float = None) -> None:
-        """Stage a top-level grid feed-in change."""
-        if enabled is not None:
-            self._feedin["enabled"] = enabled
-        if cutoff_soc is not None:
-            self._feedin["cutoff_soc"] = cutoff_soc
-
-    def set_feedin_slot(self, slot_index: int,
-                        start: str = None, end: str = None, power: int = None) -> None:
-        """Stage a slot-level grid feed-in change."""
-        slot = self._feedin_slots.setdefault(slot_index, {})
-        if start is not None:
-            slot["slot_start"] = start
-        if end is not None:
-            slot["slot_end"] = end
-        if power is not None:
-            slot["slot_power"] = power
-
-    def get_feedin(self, key: str, default=None):
-        return self._feedin.get(key, default)
-
-    def get_feedin_slot(self, slot_index: int, key: str, default=None):
-        return self._feedin_slots.get(slot_index, {}).get(key, default)
-
-    def has_feedin_pending(self) -> bool:
-        return bool(self._feedin) or bool(self._feedin_slots)
-
-    def has_any_pending(self) -> bool:
-        return self.has_battery_pending() or self.has_feedin_pending()
-
-    # --- lifecycle ---
-
-    def clear(self) -> None:
-        """Clear all pending changes (called after successful submit)."""
-        self._battery.clear()
-        self._feedin.clear()
-        self._feedin_slots.clear()
-
-
-def get_pending(hass: HomeAssistant, entry_id: str) -> Optional[PendingStore]:
-    """Return the PendingStore for this config entry."""
-    try:
-        return hass.data[DOMAIN][entry_id]["pending"]
-    except (KeyError, TypeError):
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Submit button
-# ---------------------------------------------------------------------------
 
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the submit button platform."""
+    """Set up the Submit + Discard buttons."""
     coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
-    async_add_entities([ByteWattSubmitButton(coordinator, config_entry)])
+    async_add_entities([
+        ByteWattSubmitButton(coordinator, config_entry),
+        ByteWattDiscardButton(coordinator, config_entry),
+    ])
 
 
-class ByteWattSubmitButton(CoordinatorEntity, ButtonEntity):
-    """Button that pushes all pending setting changes to the API."""
+class _PendingButtonBase(CoordinatorEntity, ButtonEntity):
+    """Shared base — always available, exposes pending_count as an attribute,
+    re-renders on every pending-state change via the dispatcher signal.
 
-    def __init__(
-        self,
-        coordinator: ByteWattDataUpdateCoordinator,
-        config_entry: ConfigEntry,
-    ) -> None:
+    Buttons are intentionally always-available (HA convention: ``available``
+    is for "literally cannot act," not "nothing to do"). Pressing with
+    nothing pending is a harmless no-op.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, config_entry: ConfigEntry) -> None:
         super().__init__(coordinator)
         self._config_entry = config_entry
-        self._attr_name = "Submit Settings"
-        self._attr_unique_id = f"{config_entry.entry_id}_submit_settings"
-        self._attr_icon = "mdi:content-save-check"
-        self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self):
+    def device_info(self) -> dict[str, Any]:
         return {
             "identifiers": {(DOMAIN, self._config_entry.entry_id)},
             "name": "ByteWatt Battery System",
             "manufacturer": "ByteWatt",
             "model": "Battery Management System",
-            "sw_version": "1.0.0",
         }
 
-    async def async_press(self) -> None:
-        """Push all pending changes to the API."""
-        entry_id = self._config_entry.entry_id
-        pending = get_pending(self.hass, entry_id)
-        client = self.hass.data[DOMAIN][entry_id]["client"]
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        m = _manager(self.hass, self._config_entry.entry_id)
+        return {"pending_count": m.pending_count()}
 
-        if not pending or not pending.has_any_pending():
-            _LOGGER.info("Submit pressed but no pending changes")
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                signal_pending_changed(self._config_entry.entry_id),
+                self._on_pending_changed,
+            )
+        )
+
+    @callback
+    def _on_pending_changed(self) -> None:
+        self.async_write_ha_state()
+
+
+class ByteWattSubmitButton(_PendingButtonBase):
+    """Push all staged changes to the inverter."""
+
+    def __init__(self, coordinator, config_entry: ConfigEntry) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "Submit Settings"
+        self._attr_unique_id = f"{config_entry.entry_id}_submit_settings"
+        self._attr_icon = "mdi:content-save-check"
+
+    async def async_press(self) -> None:
+        entry_id = self._config_entry.entry_id
+        m = _manager(self.hass, entry_id)
+
+        if not m.has_pending():
+            _LOGGER.debug("Submit pressed with nothing pending — no-op")
             return
 
-        # Snapshot pending in case we need to log what failed
-        battery_snapshot = dict(pending._battery)
-        feedin_snapshot = dict(pending._feedin)
-        feedin_slots_snapshot = {k: dict(v) for k, v in pending._feedin_slots.items()}
+        count = m.pending_count()
+        result = await m.submit()
 
-        all_ok = True
+        # Refresh sensors/data — settings cache is already updated by the
+        # manager, but other coordinator-driven state may have changed.
+        await self.coordinator.async_request_refresh()
 
-        # --- Battery settings ---
-        if pending.has_battery_pending():
-            _LOGGER.debug("Submitting battery settings: %s", battery_snapshot)
-            success = await client.update_battery_settings(**battery_snapshot)
-            if success:
-                _LOGGER.info("Battery settings submitted successfully")
-            else:
-                _LOGGER.error("Failed to submit battery settings: %s", battery_snapshot)
-                all_ok = False
+        if not result.any_attempted:
+            return
 
-        # --- Grid feed-in settings ---
-        if pending.has_feedin_pending():
-            # Apply top-level changes
-            fi_kwargs: Dict[str, Any] = {}
-            if "enabled" in feedin_snapshot:
-                fi_kwargs["enabled"] = feedin_snapshot["enabled"]
-            if "cutoff_soc" in feedin_snapshot:
-                fi_kwargs["cutoff_soc"] = feedin_snapshot["cutoff_soc"]
+        notification_id = f"bytewatt_submit_{entry_id}"
 
-            if fi_kwargs:
-                _LOGGER.debug("Submitting grid feed-in top-level: %s", fi_kwargs)
-                success = await client.update_grid_feedin_settings(**fi_kwargs)
-                if not success:
-                    _LOGGER.error("Failed to submit grid feed-in settings: %s", fi_kwargs)
-                    all_ok = False
-
-            # Apply slot changes
-            for slot_index, slot_kwargs in feedin_slots_snapshot.items():
-                _LOGGER.debug("Submitting grid feed-in slot %d: %s", slot_index, slot_kwargs)
-                success = await client.update_grid_feedin_settings(
-                    slot_index=slot_index, **slot_kwargs
-                )
-                if not success:
-                    _LOGGER.error(
-                        "Failed to submit grid feed-in slot %d: %s", slot_index, slot_kwargs
-                    )
-                    all_ok = False
-
-        if all_ok:
-            # Clear pending — API caches now hold the truth
-            pending.clear()
-            _LOGGER.info("All settings submitted successfully, pending store cleared")
-        else:
-            # Discard pending — revert to last known good API cache values
-            pending.clear()
-            _LOGGER.warning(
-                "One or more settings failed to submit — pending changes discarded, "
-                "entities will revert to last known good values"
+        if result.all_ok:
+            notify_create(
+                self.hass,
+                f"Successfully submitted {count} setting change(s).",
+                title="ByteWatt: settings saved",
+                notification_id=notification_id,
             )
+            return
 
-        # Refresh coordinator so all entities re-read from the API cache
+        # Partial or total failure — be specific about what failed and why.
+        failures = []
+        if result.battery_attempted and not result.battery_ok:
+            failures.append(f"battery settings ({result.battery_error or 'unknown error'})")
+        if result.feedin_attempted and not result.feedin_ok:
+            failures.append(f"grid feed-in settings ({result.feedin_error or 'unknown error'})")
+
+        any_success = result.battery_ok or result.feedin_ok
+        title = (
+            "ByteWatt: settings partially saved" if any_success
+            else "ByteWatt: settings save failed"
+        )
+        notify_create(
+            self.hass,
+            "Failed: " + "; ".join(failures) +
+            ". The unsaved changes have been preserved — fix the issue and press Submit again.",
+            title=title,
+            notification_id=notification_id,
+        )
+
+
+class ByteWattDiscardButton(_PendingButtonBase):
+    """Drop all staged changes without sending anything to the inverter."""
+
+    def __init__(self, coordinator, config_entry: ConfigEntry) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_name = "Discard Pending Settings"
+        self._attr_unique_id = f"{config_entry.entry_id}_discard_settings"
+        self._attr_icon = "mdi:undo-variant"
+
+    async def async_press(self) -> None:
+        entry_id = self._config_entry.entry_id
+        m = _manager(self.hass, entry_id)
+        if not m.has_pending():
+            _LOGGER.debug("Discard pressed with nothing pending — no-op")
+            return
+        count = m.discard()
+        _LOGGER.info("Discarded %d pending settings change(s)", count)
+        notify_create(
+            self.hass,
+            f"Discarded {count} unsaved setting change(s). Entities now reflect "
+            f"the inverter's current state.",
+            title="ByteWatt: pending discarded",
+            notification_id=f"bytewatt_discard_{entry_id}",
+        )
         await self.coordinator.async_request_refresh()

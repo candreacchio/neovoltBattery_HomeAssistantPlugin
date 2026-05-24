@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
-"""
-Test for the new battery data API endpoint.
+"""Manual test for the Byte-Watt battery data endpoint.
 
-This test verifies that the new battery power data endpoint works.
+Usage:
+    python3 scripts/manual_battery_data_check.py <username> <password> [station_id]
+
+Imports the integration's own ``encrypt_password`` so the script always
+matches the production code path — no duplicated encryption logic.
 """
-import sys
-import os
-import logging
+from __future__ import annotations
+
 import json
-import requests
+import logging
+import os
+import sys
 from datetime import datetime
 
-# Add the parent directory to the path so we can import for test_auth.py
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import requests
 
-# Import the encryption function from test_auth.py
-from tests.test_auth import encrypt_password
+# Make the integration importable when running this script directly.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from custom_components.bytewatt.api.neovolt_auth import (  # noqa: E402
+    EncryptionError,
+    encrypt_password,
+)
 
 # Set up logging
 logging.basicConfig(
@@ -28,14 +36,13 @@ def login(username: str, password: str, base_url: str = "https://monitor.byte-wa
     """Log in to the API and return the authentication token."""
     login_url = f"{base_url}/api/usercenter/cloud/user/login"
     
-    # Encrypt the password
-    encrypted_password = encrypt_password(password, username)
-    
-    # Create payload
-    payload = {
-        "username": username,
-        "password": encrypted_password
-    }
+    try:
+        encrypted_password = encrypt_password(password, username)
+    except EncryptionError as exc:
+        logger.error("Cannot log in: encryption failed (%s)", exc)
+        return None
+
+    payload = {"username": username, "password": encrypted_password}
     
     logger.info(f"Logging in to {login_url}")
     

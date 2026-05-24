@@ -6,14 +6,21 @@
         "data": {
           "username": "Username",
           "password": "Password",
-          "scan_interval": "Scan Interval (seconds)"
+          "scan_interval": "Scan interval (seconds)"
         }
       },
       "select_inverter": {
         "title": "Select Host Inverter",
-        "description": "Multiple inverters were found on your account. Please select the Host inverter to use for Grid Feed-in control.",
+        "description": "Found {count} inverters on your account. Select the Host inverter — it controls the Grid Feed-in and cycle strategy settings.",
         "data": {
-          "host_system_id": "Multiple inverters found — please select the Host inverter for controls"
+          "host_system_id": "Host inverter"
+        }
+      },
+      "reconfigure_select": {
+        "title": "Change Host Inverter",
+        "description": "Found {count} inverters on your account. Pick the Host inverter to use for Grid Feed-in and cycle strategy settings.",
+        "data": {
+          "host_system_id": "Host inverter"
         }
       }
     },
@@ -21,7 +28,26 @@
       "auth": "Invalid credentials. Please check your username and password."
     },
     "abort": {
-      "already_configured": "This Byte-Watt account is already configured."
+      "already_configured": "This Byte-Watt account is already configured.",
+      "auth": "Authentication failed. Update credentials and try again.",
+      "no_inverters": "No inverters were found on this account.",
+      "reconfigure_successful": "Host inverter selection updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Byte-Watt Options",
+        "data": {
+          "scan_interval": "Scan interval (seconds)"
+        }
+      }
+    }
+  },
+  "issues": {
+    "host_inverter_required": {
+      "title": "Host inverter not configured",
+      "description": "This Byte-Watt account has more than one inverter and no Host inverter has been selected. Grid Feed-in controls will not work until a Host is picked. Open Settings → Devices & Services, find the Byte-Watt entry, click the three-dot menu and choose Reconfigure."
     }
   }
 }

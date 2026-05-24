@@ -1,6 +1,67 @@
 """Data models for the Byte-Watt integration."""
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
+
+
+# ---------------------------------------------------------------------------
+# Safe field-coercion helpers used by every from_api_response().
+#
+# dict.get(key, default) returns `default` only when the KEY is missing —
+# if the API sends `"foo": null` or `"foo": ""`, dict.get returns the
+# null/empty string and the subsequent int()/float() call raises TypeError
+# or ValueError. The whole settings refresh then fails and entities go
+# unavailable. These helpers coerce missing / null / empty / non-numeric
+# values to the supplied default.
+# ---------------------------------------------------------------------------
+
+def _safe_int(data: Dict[str, Any], key: str, default: int) -> int:
+    value = data.get(key, default)
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(data: Dict[str, Any], key: str, default: float) -> float:
+    value = data.get(key, default)
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_bool(data: Dict[str, Any], key: str, default: bool) -> bool:
+    """Boolean-coerce an API field, with string-aware semantics.
+
+    bool("false") is True in Python because any non-empty string is
+    truthy — that would silently flip the wrong way for an API that ever
+    returns string booleans. Handle the common string forms explicitly
+    so this helper does the right thing regardless of whether the
+    server sends true/1/"true"/"1"/"yes"/"on".
+    """
+    value = data.get(key, default)
+    if value is None:
+        return default
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in ("true", "1", "yes", "on", "y", "t"):
+            return True
+        if lower in ("false", "0", "no", "off", "n", "f", ""):
+            return False
+        # Unknown string — log + fall back to default rather than guess.
+        return default
+    return bool(value)
+
+
+def _safe_str(data: Dict[str, Any], key: str, default: str) -> str:
+    value = data.get(key, default)
+    if value is None:
+        return default
+    return str(value)
 
 
 @dataclass
@@ -73,15 +134,15 @@ class ChargeSlot:
     @classmethod
     def from_api_response(cls, data: Dict[str, Any]) -> "ChargeSlot":
         return cls(
-            begin_time=data.get("beginTime", "00:00"),
-            end_time=data.get("endTime", "00:00"),
-            charge_limit=float(data.get("chargeLimit", 100.0)),
-            charge_power=int(data.get("chargePower", 8000)),
-            sort=int(data.get("sort", 1)),
-            weeks=data.get("weeks", [7, 1, 2, 3, 4, 5, 6]),
-            feed_mode=int(data.get("feedMode", 0)),
-            equip_group_id=int(data.get("equipGroupId", 0)),
-            feed_power=int(data.get("feedPower", 0)),
+            begin_time=_safe_str(data, "beginTime", "00:00"),
+            end_time=_safe_str(data, "endTime", "00:00"),
+            charge_limit=_safe_float(data, "chargeLimit", 100.0),
+            charge_power=_safe_int(data, "chargePower", 8000),
+            sort=_safe_int(data, "sort", 1),
+            weeks=data.get("weeks") or [7, 1, 2, 3, 4, 5, 6],
+            feed_mode=_safe_int(data, "feedMode", 0),
+            equip_group_id=_safe_int(data, "equipGroupId", 0),
+            feed_power=_safe_int(data, "feedPower", 0),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -114,15 +175,15 @@ class DischargeSlot:
     @classmethod
     def from_api_response(cls, data: Dict[str, Any]) -> "DischargeSlot":
         return cls(
-            begin_time=data.get("beginTime", "00:00"),
-            end_time=data.get("endTime", "00:00"),
-            charge_limit=float(data.get("chargeLimit", 10.0)),
-            charge_power=int(data.get("chargePower", 10000)),
-            sort=int(data.get("sort", 1)),
-            weeks=data.get("weeks", [7, 1, 2, 3, 4, 5, 6]),
-            feed_mode=int(data.get("feedMode", 0)),
-            equip_group_id=int(data.get("equipGroupId", 0)),
-            feed_power=int(data.get("feedPower", 0)),
+            begin_time=_safe_str(data, "beginTime", "00:00"),
+            end_time=_safe_str(data, "endTime", "00:00"),
+            charge_limit=_safe_float(data, "chargeLimit", 10.0),
+            charge_power=_safe_int(data, "chargePower", 10000),
+            sort=_safe_int(data, "sort", 1),
+            weeks=data.get("weeks") or [7, 1, 2, 3, 4, 5, 6],
+            feed_mode=_safe_int(data, "feedMode", 0),
+            equip_group_id=_safe_int(data, "equipGroupId", 0),
+            feed_power=_safe_int(data, "feedPower", 0),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -141,12 +202,13 @@ class DischargeSlot:
 
 @dataclass
 class CycleStrategy:
-    """
-    Battery cycle strategy — maps to getCycleStrategy / setCycleStrategy.
+    """Battery cycle strategy — maps to getCycleStrategy / setCycleStrategy.
 
-    Replaces the old BatterySettings model.
-    Property aliases are provided so existing code that reads
-    bat_use_cap, grid_charge, ctr_dis, time_chaf1a etc. keeps working.
+    Field names mirror the server-side JSON keys verbatim (snake_case).
+    Entity code does NOT access these fields directly — it goes through
+    SettingsManager, which translates logical names like ``minimum_soc``
+    to the underlying slot/field. That keeps the model layer free of
+    presentation concerns.
     """
     # Top-level flags
     grid_charge_cycle: int = 1      # gridChargeCycle  (grid charging enabled)
@@ -161,83 +223,14 @@ class CycleStrategy:
     is_support_charger_power: bool = True
     poinv: int = 10000
 
-    # Time slot lists (Time1 only exposed in HA)
+    # Time slot lists
     charge_slots: List[ChargeSlot] = field(default_factory=list)
     discharge_slots: List[DischargeSlot] = field(default_factory=list)
 
-    # Raw data preserved for round-tripping unknown fields
+    # Echo of unknown GET fields so they round-trip through PUT
     raw_data: Dict[str, Any] = field(default_factory=dict)
-    last_updated: Optional[str] = None
-
-    # ------------------------------------------------------------------
-    # Compatibility aliases so switch.py / number.py / time.py keep working
-    # ------------------------------------------------------------------
-
-    @property
-    def grid_charge(self) -> int:
-        return self.grid_charge_cycle
-
-    @grid_charge.setter
-    def grid_charge(self, v: int) -> None:
-        self.grid_charge_cycle = v
-
-    @property
-    def ctr_dis(self) -> int:
-        return self.ctr_dis_cycle
-
-    @ctr_dis.setter
-    def ctr_dis(self, v: int) -> None:
-        self.ctr_dis_cycle = v
-
-    # Charge slot 0 time aliases
-    @property
-    def time_chaf1a(self) -> str:
-        return self.charge_slots[0].begin_time if self.charge_slots else "00:00"
-
-    @time_chaf1a.setter
-    def time_chaf1a(self, v: str) -> None:
-        if self.charge_slots:
-            self.charge_slots[0].begin_time = v
-
-    @property
-    def time_chae1a(self) -> str:
-        return self.charge_slots[0].end_time if self.charge_slots else "00:00"
-
-    @time_chae1a.setter
-    def time_chae1a(self, v: str) -> None:
-        if self.charge_slots:
-            self.charge_slots[0].end_time = v
-
-    # bat_high_cap alias → charge_slots[0].charge_limit
-    @property
-    def bat_high_cap(self) -> str:
-        if self.charge_slots:
-            return str(int(self.charge_slots[0].charge_limit))
-        return "100"
-
-    @bat_high_cap.setter
-    def bat_high_cap(self, v) -> None:
-        if self.charge_slots:
-            self.charge_slots[0].charge_limit = float(v)
-
-    # Discharge slot 0 time aliases
-    @property
-    def time_disf1a(self) -> str:
-        return self.discharge_slots[0].begin_time if self.discharge_slots else "00:00"
-
-    @time_disf1a.setter
-    def time_disf1a(self, v: str) -> None:
-        if self.discharge_slots:
-            self.discharge_slots[0].begin_time = v
-
-    @property
-    def time_dise1a(self) -> str:
-        return self.discharge_slots[0].end_time if self.discharge_slots else "00:00"
-
-    @time_dise1a.setter
-    def time_dise1a(self, v: str) -> None:
-        if self.discharge_slots:
-            self.discharge_slots[0].end_time = v
+    # Set by BatterySettingsAPI after fetch; used in to_dict() for the "id" field
+    host_system_id: str = ""
 
     @classmethod
     def from_api_response(cls, data: Dict[str, Any]) -> "CycleStrategy":
@@ -250,27 +243,36 @@ class CycleStrategy:
             for s in (data.get("dayDischargeTimeList") or [])
         ]
         return cls(
-            grid_charge_cycle=int(data.get("gridChargeCycle", 1)),
-            ctr_dis_cycle=int(data.get("ctrDisCycle", 1)),
-            bat_use_cap=float(data.get("batUseCap", 10.0)),
-            execute_cycle_type=int(data.get("executeCycleType", 0)),
-            ups_reserve=int(data.get("upsReserve", 0)),
-            loadcutout_en=int(data.get("loadcutoutEn", 0)),
-            cutoff_soc=int(data.get("cutoffSoc", 0)),
-            wakeup_soc=int(data.get("wakeupSoc", 0)),
-            is_support_discharge_soc=bool(data.get("isSupportDischargeSoc", True)),
-            is_support_charger_power=bool(data.get("isSupportChargerPower", True)),
-            poinv=int(data.get("poinv", 10000)),
+            grid_charge_cycle=_safe_int(data, "gridChargeCycle", 1),
+            ctr_dis_cycle=_safe_int(data, "ctrDisCycle", 1),
+            bat_use_cap=_safe_float(data, "batUseCap", 10.0),
+            execute_cycle_type=_safe_int(data, "executeCycleType", 0),
+            ups_reserve=_safe_int(data, "upsReserve", 0),
+            loadcutout_en=_safe_int(data, "loadcutoutEn", 0),
+            cutoff_soc=_safe_int(data, "cutoffSoc", 0),
+            wakeup_soc=_safe_int(data, "wakeupSoc", 0),
+            is_support_discharge_soc=_safe_bool(data, "isSupportDischargeSoc", True),
+            is_support_charger_power=_safe_bool(data, "isSupportChargerPower", True),
+            poinv=_safe_int(data, "poinv", 10000),
             charge_slots=charge_slots,
             discharge_slots=discharge_slots,
             raw_data=data,
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        """Build the PUT payload for setCycleStrategy."""
-        result = dict(self.raw_data)  # preserve unknown fields
+        """Build the PUT payload for setCycleStrategy.
+
+        The server's GET returns ``dayChargeTimeList``/``dayDischargeTimeList``
+        but the PUT expects ``chargeTimeList``/``dischargeTimeList``
+        (verified against a live HAR capture of the Byte-Watt portal).
+        Pop the GET-side keys when echoing raw_data so they don't leak
+        stale slot data into the PUT alongside our edits.
+        """
+        result = dict(self.raw_data)
+        result.pop("dayChargeTimeList", None)
+        result.pop("dayDischargeTimeList", None)
         result.update({
-            "id": "",
+            "id": self.host_system_id,
             "batUseCap": self.bat_use_cap,
             "upsReserve": self.ups_reserve,
             "executeCycleType": self.execute_cycle_type,
@@ -286,10 +288,6 @@ class CycleStrategy:
             "poinv": self.poinv,
         })
         return result
-
-
-# Alias so any code that still imports BatterySettings keeps working
-BatterySettings = CycleStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -309,12 +307,12 @@ class GridFeedInSlot:
     @classmethod
     def from_api_response(cls, data: Dict[str, Any]) -> "GridFeedInSlot":
         return cls(
-            id=data.get("id"),
-            sys_sn=data.get("sysSn", ""),
-            start=data.get("start", "00:00"),
-            end=data.get("end", "00:00"),
-            feed_power=int(data.get("feedPower", 0)),
-            sort=int(data.get("sort", 1)),
+            id=data.get("id"),  # may legitimately be None for new slots
+            sys_sn=_safe_str(data, "sysSn", ""),
+            start=_safe_str(data, "start", "00:00"),
+            end=_safe_str(data, "end", "00:00"),
+            feed_power=_safe_int(data, "feedPower", 0),
+            sort=_safe_int(data, "sort", 1),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -353,9 +351,9 @@ class GridFeedInSettings:
         slots = [GridFeedInSlot.from_api_response(s) for s in (data.get("feedStrategyVOList") or [])]
         return cls(
             system_id=system_id,
-            battery_en=int(data.get("batteryEn", 1)),
-            battery_feed_cutoff_soc=float(data.get("batteryFeedCutoffSoc", 20.0)),
-            precharge_en=int(data.get("prechargeEn", 0)),
+            battery_en=_safe_int(data, "batteryEn", 1),
+            battery_feed_cutoff_soc=_safe_float(data, "batteryFeedCutoffSoc", 20.0),
+            precharge_en=_safe_int(data, "prechargeEn", 0),
             slots=slots,
         )
 

@@ -1,316 +1,190 @@
-"""Battery settings API interface for Byte-Watt integration."""
+"""Stateless transport for battery + grid feed-in settings.
+
+Endpoints, payload construction, retries, and 6069 re-login live here.
+Caching, pending-diff bookkeeping, and validation live in SettingsManager.
+"""
+from __future__ import annotations
+
 import asyncio
 import logging
-from typing import Optional, Dict, Any
+from typing import TYPE_CHECKING, Optional
 
-from homeassistant.util import dt as dt_util
+from ..models import CycleStrategy, GridFeedInSettings
 
-from ..models import CycleStrategy
-from ..utilities.time_utils import sanitize_time_format
-from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .neovolt_client import NeovoltClient
 
 _LOGGER = logging.getLogger(__name__)
 
+# Retry parameters — applied uniformly to GET/PUT/POST
+DEFAULT_RETRIES = 3
+DEFAULT_RETRY_DELAY = 1.0
+
+
+async def _with_relogin(api_client: "NeovoltClient", op):
+    """Run op (a no-arg async callable returning a response dict),
+    re-login once and retry if the server returns session-expiry code 6069."""
+    response = await op()
+    if response and response.get("code") == 6069:
+        _LOGGER.warning("Session expired (code 6069), re-logging in")
+        if await api_client.async_login():
+            response = await op()
+    return response
+
 
 class BatterySettingsAPI:
-    """API client for battery cycle strategy settings.
-
-    Uses getCycleStrategy / setCycleStrategy — the endpoints the
-    Byte-Watt website actually uses.
-    """
+    """Stateless transport for getCycleStrategy / setCycleStrategy."""
 
     GET_ENDPOINT = "api/iterate/sysSet/getCycleStrategy?id="
     PUT_ENDPOINT = "api/iterate/sysSet/setCycleStrategy"
 
-    def __init__(self, api_client: 'NeovoltClient'):
-        self.api_client = api_client
-        self._settings_cache: Optional[CycleStrategy] = None
-        self._settings_loaded = False
+    def __init__(self, api_client: "NeovoltClient") -> None:
+        self._client = api_client
 
     def _host_id(self) -> str:
-        """Return the configured host systemId, or empty string for single-inverter setups."""
-        return getattr(self.api_client, "host_system_id", "")
+        """Return the configured host systemId, or empty for single-inverter installs.
 
-    # ------------------------------------------------------------------
-    # Fetch
-    # ------------------------------------------------------------------
+        The Byte-Watt API tolerates ``id=`` (empty) for accounts with one
+        inverter — confirmed against HAR captures. For multi-inverter
+        accounts the behaviour is undefined; we warn ONCE per process so
+        operators see the signal in the log without spamming it on every
+        poll. The repair-issue flow surfaces the same prompt in the UI.
+        """
+        host_id = getattr(self._client, "host_system_id", "") or ""
+        if not host_id and not getattr(self._client, "_warned_empty_host_id", False):
+            _LOGGER.warning(
+                "Battery settings requests are using an empty host_system_id. "
+                "This is safe for single-inverter accounts but ambiguous for "
+                "multi-inverter accounts — open Settings → Devices & Services "
+                "→ Byte-Watt → Reconfigure to pick the Host inverter explicitly."
+            )
+            self._client._warned_empty_host_id = True
+        return host_id
 
-    async def fetch_current_settings(self, max_retries: int = 3, retry_delay: int = 1) -> Optional[CycleStrategy]:
-        """Fetch cycle strategy from the API and cache it."""
+    async def fetch_current_settings(
+        self,
+        max_retries: int = DEFAULT_RETRIES,
+        retry_delay: float = DEFAULT_RETRY_DELAY,
+    ) -> Optional[CycleStrategy]:
         endpoint = f"{self.GET_ENDPOINT}{self._host_id()}"
         for attempt in range(max_retries):
-            response = await self.api_client._async_get(endpoint)
-
-            if not response:
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                continue
-
-            if response.get("code") == 6069:
-                _LOGGER.warning("Session expired fetching cycle strategy, re-logging in")
-                if await self.api_client.async_login():
-                    response = await self.api_client._async_get(endpoint)
-
+            response = await _with_relogin(self._client, lambda: self._client._async_get(endpoint))
             if response and response.get("code") == 200 and "data" in response:
                 settings = CycleStrategy.from_api_response(response["data"])
-                settings.last_updated = dt_util.utcnow().isoformat()
-                settings.host_system_id = self._host_id()  # store so to_dict can use it
-                self._settings_cache = settings
-                self._settings_loaded = True
+                settings.host_system_id = self._host_id()
                 _LOGGER.debug(
-                    "Fetched cycle strategy (id=%s): charge=%s-%s, discharge=%s-%s, batUseCap=%.0f%%",
+                    "Fetched cycle strategy (id=%s): batUseCap=%.0f%%, "
+                    "%d charge slot(s), %d discharge slot(s)",
                     self._host_id(),
-                    settings.time_chaf1a, settings.time_chae1a,
-                    settings.time_disf1a, settings.time_dise1a,
                     settings.bat_use_cap,
+                    len(settings.charge_slots),
+                    len(settings.discharge_slots),
                 )
                 return settings
-
-            _LOGGER.error("Unexpected response fetching cycle strategy (attempt %d/%d): %s",
-                          attempt + 1, max_retries, response)
+            _LOGGER.debug(
+                "Cycle strategy fetch attempt %d/%d returned: %s",
+                attempt + 1, max_retries, response,
+            )
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
+        return None
 
-        return self._settings_cache  # cached fallback
-
-    async def get_current_settings(self) -> CycleStrategy:
-        """Return cached settings, fetching if not yet loaded."""
-        if not self._settings_loaded or self._settings_cache is None:
-            result = await self.fetch_current_settings()
-            if result:
-                return result
-        return self._settings_cache or CycleStrategy()
-
-    # ------------------------------------------------------------------
-    # Update
-    # ------------------------------------------------------------------
-
-    async def update_battery_settings(self,
-                                      discharge_start_time: str = None,
-                                      discharge_end_time: str = None,
-                                      charge_start_time: str = None,
-                                      charge_end_time: str = None,
-                                      minimum_soc: int = None,
-                                      charge_cap: int = None,
-                                      discharge_time_control: bool = None,
-                                      grid_charging: bool = None,
-                                      charge_power: int = None,
-                                      discharge_power: int = None,
-                                      max_retries: int = 5,
-                                      retry_delay: int = 1) -> bool:
-        """Merge changes into current settings and PUT to the API."""
-        current = await self.get_current_settings()
-
-        if charge_start_time:
-            sanitized = sanitize_time_format(charge_start_time)
-            if sanitized:
-                current.time_chaf1a = sanitized
-
-        if charge_end_time:
-            sanitized = sanitize_time_format(charge_end_time)
-            if sanitized:
-                current.time_chae1a = sanitized
-
-        if discharge_start_time:
-            sanitized = sanitize_time_format(discharge_start_time)
-            if sanitized:
-                current.time_disf1a = sanitized
-
-        if discharge_end_time:
-            sanitized = sanitize_time_format(discharge_end_time)
-            if sanitized:
-                current.time_dise1a = sanitized
-
-        if minimum_soc is not None:
-            current.bat_use_cap = float(minimum_soc)
-
-        if charge_cap is not None:
-            current.bat_high_cap = str(charge_cap)
-
-        if discharge_time_control is not None:
-            current.ctr_dis_cycle = 1 if discharge_time_control else 0
-
-        if grid_charging is not None:
-            current.grid_charge_cycle = 1 if grid_charging else 0
-
-        if charge_power is not None and current.charge_slots:
-            current.charge_slots[0].charge_power = int(charge_power)
-
-        if discharge_power is not None and current.discharge_slots:
-            current.discharge_slots[0].charge_power = int(discharge_power)
-
-        return await self._send_settings(current, max_retries, retry_delay)
-
-    async def _send_settings(self, settings: CycleStrategy,
-                             max_retries: int = 5, retry_delay: int = 1) -> bool:
-        """PUT settings to the API."""
+    async def put(
+        self,
+        settings: CycleStrategy,
+        max_retries: int = DEFAULT_RETRIES,
+        retry_delay: float = DEFAULT_RETRY_DELAY,
+    ) -> bool:
         payload = settings.to_dict()
-        # Always use the configured host systemId in the payload
         payload["id"] = self._host_id()
-
         for attempt in range(max_retries):
-            response = await self.api_client._async_put(self.PUT_ENDPOINT, payload)
-
-            if not response:
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                continue
-
-            if response.get("code") == 6069:
-                _LOGGER.warning("Session expired sending cycle strategy, re-logging in")
-                if await self.api_client.async_login():
-                    response = await self.api_client._async_put(self.PUT_ENDPOINT, payload)
-
+            response = await _with_relogin(
+                self._client, lambda: self._client._async_put(self.PUT_ENDPOINT, payload)
+            )
             if response and response.get("code") == 200 and response.get("msg") == "Success":
-                self._settings_cache = settings
-                self._settings_loaded = True
-                _LOGGER.info("Cycle strategy updated successfully")
                 return True
-
-            _LOGGER.error("Failed to update cycle strategy (attempt %d/%d): %s",
-                          attempt + 1, max_retries, response)
+            # Code 9007 is a transient server-side network exception; retry with backoff
+            if response and response.get("code") == 9007:
+                _LOGGER.warning(
+                    "setCycleStrategy transient error 9007 (attempt %d/%d), retrying",
+                    attempt + 1, max_retries,
+                )
+            else:
+                _LOGGER.debug(
+                    "setCycleStrategy attempt %d/%d returned: %s",
+                    attempt + 1, max_retries, response,
+                )
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
-
         return False
 
-    # Legacy method kept for backward compatibility
-    async def set_battery_settings(self, end_discharge="23:00", max_retries: int = 5, retry_delay: int = 1) -> bool:
-        return await self.update_battery_settings(
-            discharge_end_time=sanitize_time_format(end_discharge),
-            max_retries=max_retries,
-            retry_delay=retry_delay,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Grid feed-in settings API (unchanged from previous work)
-# ---------------------------------------------------------------------------
 
 class GridFeedInSettingsAPI:
-    """API client for grid feed-in control settings."""
+    """Stateless transport for getFeedStrategyList / saveFeedStrategy."""
 
-    GET_ENDPOINT = "api/iterate/sysSet/getFeedStrategyList"
+    GET_ENDPOINT = "api/iterate/sysSet/getFeedStrategyList?id="
     POST_ENDPOINT = "api/iterate/sysSet/saveFeedStrategy"
-    SYSTEM_LIST_ENDPOINT = "api/stable/home/getCustomMenuEssList?inverterMode=0"
 
-    def __init__(self, api_client: 'NeovoltClient'):
-        self.api_client = api_client
-        self._cache = None
+    def __init__(self, api_client: "NeovoltClient") -> None:
+        self._client = api_client
 
-    async def _get_system_id(self) -> str:
-        """Return the configured Host inverter systemId.
+    def _host_id(self) -> str:
+        return getattr(self._client, "host_system_id", "") or ""
 
-        Uses the value set during config flow setup. Falls back to fetching
-        the list and picking the first entry for single-inverter setups or
-        legacy configs that predate the inverter selection step.
-        """
-        # Use the pre-configured value if available
-        if getattr(self.api_client, "host_system_id", ""):
-            return self.api_client.host_system_id
-
-        # Fallback: fetch list and take first entry (single inverter or legacy)
-        _LOGGER.warning(
-            "No host_system_id configured — fetching inverter list and using first entry. "
-            "Re-configure the integration to select the correct Host inverter."
-        )
-        response = await self.api_client._async_get(self.SYSTEM_LIST_ENDPOINT)
-        if response and response.get("code") == 200:
-            data = response.get("data") or []
-            if data:
-                system_id = data[0].get("systemId", "")
-                _LOGGER.warning("Using systemId=%s as fallback", system_id)
-                return system_id
-        _LOGGER.error("Could not resolve systemId for grid feed-in")
-        return ""
-
-    async def fetch_current_settings(self, max_retries: int = 3, retry_delay: int = 1):
-        from ..models import GridFeedInSettings
-
-        system_id = await self._get_system_id()
-        if not system_id:
-            return self._cache
-
-        endpoint = f"{self.GET_ENDPOINT}?id={system_id}"
-
+    async def fetch_current_settings(
+        self,
+        max_retries: int = DEFAULT_RETRIES,
+        retry_delay: float = DEFAULT_RETRY_DELAY,
+    ) -> Optional[GridFeedInSettings]:
+        host_id = self._host_id()
+        if not host_id:
+            _LOGGER.debug(
+                "Skipping grid feed-in fetch — no host_system_id configured. "
+                "Reconfigure the integration to select the Host inverter."
+            )
+            return None
+        endpoint = f"{self.GET_ENDPOINT}{host_id}"
         for attempt in range(max_retries):
-            response = await self.api_client._async_get(endpoint)
-
-            if not response:
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                continue
-
-            if response.get("code") == 6069:
-                if await self.api_client.async_login():
-                    response = await self.api_client._async_get(endpoint)
-
+            response = await _with_relogin(self._client, lambda: self._client._async_get(endpoint))
             if response and response.get("code") == 200 and "data" in response:
-                settings = GridFeedInSettings.from_api_response(response["data"], system_id)
-                self._cache = settings
+                settings = GridFeedInSettings.from_api_response(response["data"], host_id)
+                _LOGGER.debug(
+                    "Fetched grid feed-in (id=%s): enabled=%s, %d slot(s)",
+                    host_id, bool(settings.battery_en), len(settings.slots),
+                )
                 return settings
-
-            _LOGGER.error("Unexpected response fetching grid feed-in (attempt %d/%d): %s",
-                          attempt + 1, max_retries, response)
+            _LOGGER.debug(
+                "Grid feed-in fetch attempt %d/%d returned: %s",
+                attempt + 1, max_retries, response,
+            )
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
+        return None
 
-        return self._cache
-
-    async def update_settings(self,
-                              enabled: bool = None,
-                              cutoff_soc: float = None,
-                              slot_index: int = None,
-                              slot_start: str = None,
-                              slot_end: str = None,
-                              slot_power: int = None,
-                              max_retries: int = 5,
-                              retry_delay: int = 1) -> bool:
-        from ..models import GridFeedInSettings, GridFeedInSlot
-
-        current = await self.fetch_current_settings()
-        if current is None:
-            current = GridFeedInSettings()
-
-        if enabled is not None:
-            current.enabled = enabled
-        if cutoff_soc is not None:
-            current.battery_feed_cutoff_soc = float(cutoff_soc)
-        if slot_index is not None:
-            while len(current.slots) <= slot_index:
-                current.slots.append(GridFeedInSlot(sort=len(current.slots) + 1))
-            slot = current.slots[slot_index]
-            if slot_start is not None:
-                slot.start = slot_start
-            if slot_end is not None:
-                slot.end = slot_end
-            if slot_power is not None:
-                slot.feed_power = slot_power
-
-        payload = current.to_dict()
-
+    async def post(
+        self,
+        settings: GridFeedInSettings,
+        max_retries: int = DEFAULT_RETRIES,
+        retry_delay: float = DEFAULT_RETRY_DELAY,
+    ) -> bool:
+        payload = settings.to_dict()
+        payload["id"] = self._host_id()
         for attempt in range(max_retries):
-            response = await self.api_client._async_post(self.POST_ENDPOINT, payload)
-
-            if not response:
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                continue
-
-            if response.get("code") == 6069:
-                if await self.api_client.async_login():
-                    response = await self.api_client._async_post(self.POST_ENDPOINT, payload)
-
+            response = await _with_relogin(
+                self._client, lambda: self._client._async_post(self.POST_ENDPOINT, payload)
+            )
             if response and response.get("code") == 200:
-                self._cache = current
-                _LOGGER.info("Grid feed-in settings saved successfully")
                 return True
-
-            _LOGGER.error("Failed to save grid feed-in (attempt %d/%d): %s",
-                          attempt + 1, max_retries, response)
+            if response and response.get("code") == 9007:
+                _LOGGER.warning(
+                    "saveFeedStrategy transient error 9007 (attempt %d/%d), retrying",
+                    attempt + 1, max_retries,
+                )
+            else:
+                _LOGGER.debug(
+                    "saveFeedStrategy attempt %d/%d returned: %s",
+                    attempt + 1, max_retries, response,
+                )
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
-
         return False

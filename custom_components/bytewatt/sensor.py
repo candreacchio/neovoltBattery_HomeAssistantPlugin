@@ -341,7 +341,10 @@ class ByteWattSensor(CoordinatorEntity, SensorEntity):
         self._attr_name = name
         self._attr_unique_id = f"{config_entry.entry_id}_{sensor_type}"
         self._attr_device_class = device_class
-        self._attr_native_unit_of_measurement = unit
+        # HA forbids unit_of_measurement on certain device classes (e.g. timestamp);
+        # treat the empty string as None to silence the deprecation warning that
+        # will become a hard validation error in a future HA release.
+        self._attr_native_unit_of_measurement = unit if unit else None
         self._attr_icon = icon
         self._attr_entity_category = entity_category
 
