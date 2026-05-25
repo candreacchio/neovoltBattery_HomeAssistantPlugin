@@ -97,33 +97,25 @@ class ByteWattSubmitButton(_PendingButtonBase):
             _LOGGER.debug("Submit pressed with nothing pending — no-op")
             return
 
-        count = m.pending_count()
         result = await m.submit()
 
         # Refresh sensors/data — settings cache is already updated by the
         # manager, but other coordinator-driven state may have changed.
         await self.coordinator.async_request_refresh()
 
-        if not result.any_attempted:
+        if not result.any_attempted or result.all_ok:
             return
 
         notification_id = f"bytewatt_submit_{entry_id}"
 
-        if result.all_ok:
-            notify_create(
-                self.hass,
-                f"Successfully submitted {count} setting change(s).",
-                title="ByteWatt: settings saved",
-                notification_id=notification_id,
-            )
-            return
-
         # Partial or total failure — be specific about what failed and why.
         failures = []
         if result.battery_attempted and not result.battery_ok:
-            failures.append(f"battery settings ({result.battery_error or 'unknown error'})")
+            detail = result.battery_error or "unknown error"
+            failures.append(f"battery settings: {detail}")
         if result.feedin_attempted and not result.feedin_ok:
-            failures.append(f"grid feed-in settings ({result.feedin_error or 'unknown error'})")
+            detail = result.feedin_error or "unknown error"
+            failures.append(f"grid feed-in settings: {detail}")
 
         any_success = result.battery_ok or result.feedin_ok
         title = (
@@ -132,8 +124,8 @@ class ByteWattSubmitButton(_PendingButtonBase):
         )
         notify_create(
             self.hass,
-            "Failed: " + "; ".join(failures) +
-            ". The unsaved changes have been preserved — fix the issue and press Submit again.",
+            "Failed after retries — " + "; ".join(failures) +
+            ". Unsaved changes have been preserved — fix the issue and press Submit again.",
             title=title,
             notification_id=notification_id,
         )

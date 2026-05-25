@@ -518,30 +518,70 @@ class SettingsManager:
         self._notify_pending_changed()
         return result
 
+    # Retry parameters for submit operations
+    SUBMIT_RETRIES = 3
+    SUBMIT_RETRY_DELAY = 4.0  # seconds between attempts
+
     async def _submit_battery(
         self, snapshot: Dict[str, Any], result: SubmitResult
     ) -> None:
         if not snapshot:
             return
         result.battery_attempted = True
+
+        # Fetch the inverter's current settings immediately before building the
+        # payload. Stale cache can contain raw_data fields (e.g. poinv) whose
+        # values differ from what the server currently holds, causing otherwise-
+        # valid requests to be rejected. A fresh GET guarantees the PUT payload
+        # is built against the actual current inverter state.
+        _LOGGER.debug("Fetching fresh battery settings before submit (entry=%s)", self._entry_id)
+        fresh = await BatterySettingsAPI(self._client).fetch_current_settings()
+        if fresh is not None:
+            self._battery_cache = fresh
+        else:
+            _LOGGER.warning(
+                "Could not fetch fresh battery settings before submit — "
+                "falling back to cached data (entry=%s)",
+                self._entry_id,
+            )
+
         try:
             merged = self._build_battery_payload(snapshot)
         except SettingsValidationError as ex:
             _LOGGER.error("Cannot build battery payload: %s", ex)
             result.battery_error = str(ex)
             return
-        ok = await BatterySettingsAPI(self._client).put(merged)
-        if ok:
-            self._battery_cache = merged
-            self._battery_submitted_at = dt_util.utcnow()
-            result.battery_ok = True
-            _LOGGER.info(
-                "Battery settings submitted (entry=%s, host=%s)",
-                self._entry_id, getattr(self._client, "host_system_id", "") or "default",
+        api = BatterySettingsAPI(self._client)
+        for attempt in range(1, self.SUBMIT_RETRIES + 1):
+            ok = await api.put(merged)
+            if ok:
+                self._battery_cache = merged
+                self._battery_submitted_at = dt_util.utcnow()
+                result.battery_ok = True
+                _LOGGER.info(
+                    "Battery settings submitted (entry=%s, host=%s, attempt=%d/%d)",
+                    self._entry_id,
+                    getattr(self._client, "host_system_id", "") or "default",
+                    attempt,
+                    self.SUBMIT_RETRIES,
+                )
+                return
+            result.battery_error = f"API call failed on attempt {attempt}/{self.SUBMIT_RETRIES}"
+            _LOGGER.warning(
+                "Battery submit attempt %d/%d failed (entry=%s); %s",
+                attempt,
+                self.SUBMIT_RETRIES,
+                self._entry_id,
+                "retrying in %.0fs" % self.SUBMIT_RETRY_DELAY
+                if attempt < self.SUBMIT_RETRIES
+                else "no more retries",
             )
-        else:
-            result.battery_error = "API call failed (see prior log lines)"
-            _LOGGER.error("Battery submit failed; pending changes preserved")
+            if attempt < self.SUBMIT_RETRIES:
+                await asyncio.sleep(self.SUBMIT_RETRY_DELAY)
+        _LOGGER.error(
+            "Battery submit failed after %d attempt(s); pending changes preserved",
+            self.SUBMIT_RETRIES,
+        )
 
     async def _submit_feedin(
         self,
@@ -552,24 +592,58 @@ class SettingsManager:
         if not (snapshot_top or snapshot_slots):
             return
         result.feedin_attempted = True
+
+        # Same rationale as _submit_battery: fetch the live inverter state so
+        # the POST payload is built against current server data, not a cache
+        # that may be up to POST_SUBMIT_TRUST_SECONDS stale.
+        _LOGGER.debug("Fetching fresh feed-in settings before submit (entry=%s)", self._entry_id)
+        fresh = await GridFeedInSettingsAPI(self._client).fetch_current_settings()
+        if fresh is not None:
+            self._feedin_cache = fresh
+        else:
+            _LOGGER.warning(
+                "Could not fetch fresh feed-in settings before submit — "
+                "falling back to cached data (entry=%s)",
+                self._entry_id,
+            )
+
         try:
             merged = self._build_feedin_payload(snapshot_top, snapshot_slots)
         except SettingsValidationError as ex:
             _LOGGER.error("Cannot build feed-in payload: %s", ex)
             result.feedin_error = str(ex)
             return
-        ok = await GridFeedInSettingsAPI(self._client).post(merged)
-        if ok:
-            self._feedin_cache = merged
-            self._feedin_submitted_at = dt_util.utcnow()
-            result.feedin_ok = True
-            _LOGGER.info(
-                "Grid feed-in settings submitted (entry=%s, host=%s)",
-                self._entry_id, getattr(self._client, "host_system_id", "") or "default",
+        api = GridFeedInSettingsAPI(self._client)
+        for attempt in range(1, self.SUBMIT_RETRIES + 1):
+            ok = await api.post(merged)
+            if ok:
+                self._feedin_cache = merged
+                self._feedin_submitted_at = dt_util.utcnow()
+                result.feedin_ok = True
+                _LOGGER.info(
+                    "Grid feed-in settings submitted (entry=%s, host=%s, attempt=%d/%d)",
+                    self._entry_id,
+                    getattr(self._client, "host_system_id", "") or "default",
+                    attempt,
+                    self.SUBMIT_RETRIES,
+                )
+                return
+            result.feedin_error = f"API call failed on attempt {attempt}/{self.SUBMIT_RETRIES}"
+            _LOGGER.warning(
+                "Feed-in submit attempt %d/%d failed (entry=%s); %s",
+                attempt,
+                self.SUBMIT_RETRIES,
+                self._entry_id,
+                "retrying in %.0fs" % self.SUBMIT_RETRY_DELAY
+                if attempt < self.SUBMIT_RETRIES
+                else "no more retries",
             )
-        else:
-            result.feedin_error = "API call failed (see prior log lines)"
-            _LOGGER.error("Feed-in submit failed; pending changes preserved")
+            if attempt < self.SUBMIT_RETRIES:
+                await asyncio.sleep(self.SUBMIT_RETRY_DELAY)
+        _LOGGER.error(
+            "Feed-in submit failed after %d attempt(s); pending changes preserved",
+            self.SUBMIT_RETRIES,
+        )
 
     # Restore helpers — `setdefault` ensures fresh stage_* calls made during
     # the submit win over the restored snapshot value on conflict (later
