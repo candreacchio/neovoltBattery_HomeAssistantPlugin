@@ -313,3 +313,100 @@ def test_submitresult_not_all_ok_on_partial_failure():
                      feedin_attempted=True, feedin_ok=False)
     assert r.all_ok is False
     assert r.any_attempted is True
+
+
+# ---------------------------------------------------------------------------
+# Submit retry loop — the behaviour we just changed.
+#
+# The key property: a FAILING submit must re-fetch + rebuild on EACH attempt
+# (so a stale-data rejection self-heals), not re-send one payload. And a
+# SUCCESS must clear pending + update cache. Patch the API classes in the
+# settings_manager namespace with fakes that count calls.
+# ---------------------------------------------------------------------------
+
+class _FakeBatteryAPI:
+    """Counts fetch/put calls; put outcome driven by `put_results`."""
+    instances: list = []
+
+    def __init__(self, client):
+        self.client = client
+        self.fetch_calls = 0
+        self.put_calls = 0
+        _FakeBatteryAPI.instances.append(self)
+
+    async def fetch_current_settings(self, max_retries=3, retry_delay=1.0):
+        self.fetch_calls += 1
+        return _FakeBatteryAPI.cache
+
+    async def put(self, merged, max_retries=3, retry_delay=1.0):
+        self.put_calls += 1
+        # max_retries must be 1 — the manager owns the retry loop now.
+        assert max_retries == 1, "transport put() should be single-attempt"
+        return _FakeBatteryAPI.put_results.pop(0)
+
+
+@pytest.fixture
+def patch_battery_api(monkeypatch, populated_cache):
+    _FakeBatteryAPI.instances = []
+    _FakeBatteryAPI.cache = populated_cache
+    _FakeBatteryAPI.put_results = []
+    monkeypatch.setattr(
+        "custom_components.bytewatt.settings_manager.BatterySettingsAPI",
+        _FakeBatteryAPI,
+    )
+    return _FakeBatteryAPI
+
+
+async def test_submit_succeeds_first_attempt(manager, populated_cache, patch_battery_api):
+    patch_battery_api.put_results = [True]
+    manager._battery_cache = populated_cache
+    manager.stage_battery("minimum_soc", 25)
+
+    result = await manager.submit()
+
+    assert result.battery_ok is True
+    assert manager.has_pending() is False           # cleared on success
+    assert manager._battery_cache.bat_use_cap == 25.0  # cache reflects submit
+    # Exactly one fetch + one put across the (single) attempt.
+    total_fetch = sum(i.fetch_calls for i in patch_battery_api.instances)
+    total_put = sum(i.put_calls for i in patch_battery_api.instances)
+    assert total_fetch == 1
+    assert total_put == 1
+
+
+async def test_submit_refetches_and_rebuilds_on_each_retry(
+    manager, populated_cache, patch_battery_api, monkeypatch
+):
+    """Fail twice, succeed on the third attempt. Each attempt must do its own
+    fetch + put — proving the retry re-fetches rather than re-sending."""
+    patch_battery_api.put_results = [False, False, True]
+    monkeypatch.setattr(manager, "SUBMIT_RETRY_DELAY", 0)  # no real sleeps
+    manager._battery_cache = populated_cache
+    manager.stage_battery("minimum_soc", 25)
+
+    result = await manager.submit()
+
+    assert result.battery_ok is True
+    total_fetch = sum(i.fetch_calls for i in patch_battery_api.instances)
+    total_put = sum(i.put_calls for i in patch_battery_api.instances)
+    assert total_fetch == 3, "must re-fetch on every attempt"
+    assert total_put == 3, "one put per attempt"
+    assert manager.has_pending() is False
+
+
+async def test_submit_preserves_pending_after_all_retries_fail(
+    manager, populated_cache, patch_battery_api, monkeypatch
+):
+    patch_battery_api.put_results = [False, False, False]
+    monkeypatch.setattr(manager, "SUBMIT_RETRY_DELAY", 0)
+    manager._battery_cache = populated_cache
+    manager.stage_battery("minimum_soc", 25)
+
+    result = await manager.submit()
+
+    assert result.battery_attempted is True
+    assert result.battery_ok is False
+    assert result.battery_error  # populated
+    # Pending preserved so the user can fix + retry without re-entering.
+    assert manager.has_pending() is True
+    assert manager.effective_battery("minimum_soc") == 25
