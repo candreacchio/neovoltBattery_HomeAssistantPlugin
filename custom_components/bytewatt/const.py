@@ -44,6 +44,7 @@ ATTR_START_CHARGE = "start_charge"
 ATTR_END_CHARGE = "end_charge"
 ATTR_MINIMUM_SOC = "minimum_soc"
 ATTR_CHARGE_CAP = "charge_cap"
+ATTR_ENTRY_ID = "entry_id"
 
 # Sensor types
 SENSOR_SOC = "soc"
@@ -52,14 +53,6 @@ SENSOR_HOUSE_CONSUMPTION = "house_consumption"
 SENSOR_BATTERY_POWER = "battery_power"
 SENSOR_PV = "pv_power"
 SENSOR_LAST_UPDATE = "last_update"
-
-# Battery settings sensor types
-SENSOR_DISCHARGE_START = "discharge_start_time"
-SENSOR_DISCHARGE_END = "discharge_end_time"
-SENSOR_CHARGE_START = "charge_start_time"
-SENSOR_CHARGE_END = "charge_end_time"
-SENSOR_MIN_SOC = "minimum_soc"
-SENSOR_CHARGE_CAP = "charge_cap"
 
 # Grid stats sensor types
 SENSOR_TOTAL_SOLAR = "total_solar_generation"
@@ -88,5 +81,39 @@ SENSOR_CO2_REDUCTION = "co2_reduction_tons"
 MAX_DIAGNOSTIC_LOGS = 100
 RECENT_DATA_THRESHOLD = 300  # 5 minutes in seconds
 STALE_DATA_THRESHOLD = 3600  # 1 hour in seconds
-AUTO_RECONNECT_INTERVAL_HOURS = 24  # 24 hours
 HTTPS_PORT = 443
+
+# Grid Feed-in Control constants
+SERVICE_SET_GRID_FEEDIN_ENABLED = "set_grid_feedin_enabled"
+SERVICE_SET_GRID_FEEDIN_CUTOFF_SOC = "set_grid_feedin_cutoff_soc"
+SERVICE_UPDATE_GRID_FEEDIN_SLOT = "update_grid_feedin_slot"
+
+ATTR_FEEDIN_ENABLED = "feedin_enabled"
+ATTR_FEEDIN_CUTOFF_SOC = "feedin_cutoff_soc"
+ATTR_FEEDIN_SLOT = "slot"
+ATTR_FEEDIN_START = "start_time"
+ATTR_FEEDIN_END = "end_time"
+ATTR_FEEDIN_POWER = "power_watts"
+
+# Host inverter selection
+CONF_HOST_SYSTEM_ID = "host_system_id"
+CONF_HOST_SYS_SN = "host_sys_sn"
+
+# Config entry schema version — bump and add an async_migrate_entry branch
+# whenever you change the shape of entry.data.
+CURRENT_ENTRY_VERSION = 2
+
+# Maximum number of feed-in slots the inverter supports (per the
+# timePeriodLimit field on getFeedStrategyList — confirmed against a HAR
+# capture from the Byte-Watt portal).
+FEEDIN_MAX_SLOTS = 6
+
+# Practical max feed-in power in watts — hardware top end is ~20 kW on
+# the inverters Byte-Watt targets. Used for both service-call validation
+# and entity slider max.
+FEEDIN_MAX_POWER_W = 20000
+
+
+def signal_pending_changed(entry_id: str) -> str:
+    """Dispatcher signal name for pending-store changes on a given entry."""
+    return f"bytewatt_pending_{entry_id}"

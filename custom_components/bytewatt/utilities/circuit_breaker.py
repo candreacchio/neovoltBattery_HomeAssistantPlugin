@@ -91,6 +91,21 @@ class CircuitBreaker:
         else:  # OPEN
             return False
     
+    def reset(self) -> None:
+        """Force the circuit back to CLOSED and clear the failure history.
+
+        Called by the recovery flow after the operator (or auto-reconnect) has
+        re-established the connection. Without this, a recovered-but-still-OPEN
+        circuit would keep refusing requests until the failure window aged out
+        naturally on its own.
+        """
+        previous_state = self.state
+        self.state = CircuitBreakerState.CLOSED
+        self.last_state_change = datetime.now()
+        self.stats.reset()
+        if previous_state != CircuitBreakerState.CLOSED:
+            _LOGGER.info("Circuit breaker reset from %s to CLOSED", previous_state.value)
+
     def get_status_report(self) -> Dict[str, Any]:
         """Generate a status report of circuit breaker health."""
         state_duration = (datetime.now() - self.last_state_change).total_seconds()

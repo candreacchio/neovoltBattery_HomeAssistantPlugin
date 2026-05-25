@@ -7,6 +7,7 @@
   "documentation": "https://github.com/candreacchio/neovoltBattery_HomeAssistantPlugin",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/candreacchio/neovoltBattery_HomeAssistantPlugin/issues",
-  "requirements": ["requests"],
-  "version": "1.0.0"
+  "min_ha_version": "2024.11.0",
+  "requirements": ["pycryptodome>=3.18.0"],
+  "version": "1.1.0"
 }

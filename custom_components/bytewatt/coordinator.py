@@ -12,7 +12,11 @@ from typing import Dict, Any, List, Optional, Set
 import voluptuous as vol
 from homeassistant.components.persistent_notification import async_create, async_dismiss
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_time_change,
+    async_track_time_interval,
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -34,7 +38,6 @@ from .const import (
     MAX_DIAGNOSTIC_LOGS,
     RECENT_DATA_THRESHOLD,
     STALE_DATA_THRESHOLD,
-    AUTO_RECONNECT_INTERVAL_HOURS,
     HTTPS_PORT,
 )
 from .utilities.circuit_breaker import CircuitBreaker, CircuitBreakerState
@@ -71,9 +74,12 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
         self._heartbeat_unsub = None
         self._recovery_attempts = 0
         self._auto_reconnect_unsub = None
-        self._webhook_id = None
-        self._webhook_unsub = None
-        
+        # async_call_later unsubscribe for the post-failure recovery retry.
+        # Tracked so we can cancel it on entry unload — otherwise the
+        # callback would fire on a torn-down coordinator.
+        self._recovery_retry_unsub = None
+
+
         # Connection health tracking
         self.circuit_breaker = CircuitBreaker()
         
@@ -102,40 +108,43 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
     
     @contextmanager
     def _timed_operation(self, operation_name: str):
-        """Context manager for timing operations and recording diagnostics."""
+        """Context manager for timing operations + recording to the circuit breaker.
+
+        Circuit-breaker stats are recorded ALWAYS — previously they were gated
+        behind diagnostics_mode, which meant default installs never tracked
+        failure rates and the circuit never opened. With that gating in place
+        the entire recovery path was effectively a no-op.
+        """
         start_time = time.time()
         error = None
-        
+
         try:
             yield
         except Exception as e:
             error = e
             raise
         finally:
-            end_time = time.time()
-            duration = end_time - start_time
-            
+            duration = time.time() - start_time
+
+            # Always record to the circuit breaker so it can actually trip.
+            if error:
+                self.circuit_breaker.record_failure(
+                    type(error).__name__, str(error)
+                )
+            else:
+                self.circuit_breaker.record_success(duration)
+
+            # Verbose per-operation diagnostics are still opt-in.
             if self.diagnostic_service.diagnostics_enabled:
                 details = {
                     "operation": operation_name,
                     "duration": f"{duration:.3f}s",
-                    "success": error is None
+                    "success": error is None,
                 }
-                
                 if error:
                     details["error"] = str(error)
                     details["error_type"] = type(error).__name__
-                
                 self.diagnostic_service.log_diagnostic("operation", details)
-                
-                # Record in circuit breaker stats
-                if error:
-                    self.circuit_breaker.record_failure(
-                        type(error).__name__, 
-                        str(error)
-                    )
-                else:
-                    self.circuit_breaker.record_success(duration)
     
     async def _async_update_data(self):
         """Update data via library with improved error handling."""
@@ -168,15 +177,12 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
             with self._timed_operation("get_battery_data"):
                 battery_data = await self.client.get_battery_data()
             
-            # Get battery settings (don't fail if this fails)
-            # Skip if we recently updated settings to prevent cache race condition
-            try:
-                if self.client.api_client.has_fresh_settings_update():
-                    _LOGGER.debug("Skipping battery settings fetch - fresh update in progress")
-                else:
-                    await self.client.api_client.async_get_battery_settings()
-            except Exception as ex:
-                _LOGGER.warning(f"Failed to fetch battery settings: {ex}")
+            # Refresh battery + grid feed-in settings via the manager.
+            # The manager owns its lock so concurrent submit() / refresh() are serialized,
+            # and per-batch failures are swallowed there — don't fail the poll on them.
+            manager = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {}).get("manager")
+            if manager is not None:
+                await manager.refresh()
             
             # If we got battery data, update our cached version and last successful time
             if battery_data:
@@ -207,10 +213,7 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
             
             # If we got here successfully, ensure any error notifications are dismissed
             if self._notify_on_recovery:
-                try:
-                    await self.hass.components.persistent_notification.async_dismiss(NOTIFICATION_ERROR)
-                except (AttributeError, TypeError):
-                    _LOGGER.debug("Could not dismiss notification - may not exist yet")
+                async_dismiss(self.hass, NOTIFICATION_ERROR)
             
             # Return the data along with connection status
             data = {
@@ -253,20 +256,14 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
                     "last_updated": self._last_successful_update.isoformat() if self._last_successful_update else "unknown"
                 }
             else:
-                # Create error notification if enabled
                 if self._notify_on_recovery:
-                    try:
-                        await self.hass.components.persistent_notification.async_create(
-                            f"ByteWatt integration error: {err}",
-                            title="ByteWatt Connection Error",
-                            notification_id=NOTIFICATION_ERROR
-                        )
-                    except (AttributeError, TypeError) as notification_error:
-                        # Log complete traceback for debugging
-                        import traceback
-                        _LOGGER.error(f"Could not create error notification: {notification_error}")
-                        _LOGGER.error(f"Traceback: {traceback.format_exc()}")
-                    
+                    async_create(
+                        self.hass,
+                        f"ByteWatt integration error: {err}",
+                        title="ByteWatt Connection Error",
+                        notification_id=NOTIFICATION_ERROR,
+                    )
+
                 raise UpdateFailed(f"Error communicating with API: {err}")
     
     async def start_heartbeat(self) -> None:
@@ -291,32 +288,37 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
         })
     
     async def start_auto_reconnect(self) -> None:
-        """Start scheduled daily reconnection."""
+        """Schedule daily reconnection at the configured wall-clock time.
+
+        Previously this fired every 24 h from startup regardless of the
+        configured ``auto_reconnect_time``, so the setting was decorative.
+        Uses ``async_track_time_change`` so the reconnect lands at a
+        predictable hour (default 03:30 — outside peak monitoring hours
+        and after the daily server-side stats rollover).
+        """
         if self._auto_reconnect_unsub is not None:
             self._auto_reconnect_unsub()
-        
-        # Schedule reconnect every 24 hours
-        self._auto_reconnect_unsub = async_track_time_interval(
+
+        reconnect_time = dt_util.parse_time(self._auto_reconnect_time)
+        if reconnect_time is None:
+            _LOGGER.warning(
+                "Invalid auto_reconnect_time %r, falling back to %s",
+                self._auto_reconnect_time, DEFAULT_AUTO_RECONNECT_TIME,
+            )
+            reconnect_time = dt_util.parse_time(DEFAULT_AUTO_RECONNECT_TIME)
+
+        self._auto_reconnect_unsub = async_track_time_change(
             self.hass,
             self._handle_auto_reconnect,
-            timedelta(hours=AUTO_RECONNECT_INTERVAL_HOURS)
+            hour=reconnect_time.hour,
+            minute=reconnect_time.minute,
+            second=reconnect_time.second,
         )
-        _LOGGER.info(f"Automatic reconnect scheduled every {AUTO_RECONNECT_INTERVAL_HOURS} hours")
-        
-        # Immediately run a check if a time is configured
-        if hasattr(self, '_auto_reconnect_time') and self._auto_reconnect_time:
-            try:
-                current_time = dt_util.utcnow().time()
-                reconnect_time = dt_util.parse_time(self._auto_reconnect_time)
-                
-                if reconnect_time:
-                    # The _handle_auto_reconnect will be called by the interval
-                    # eventually, but we log the configured time for reference
-                    _LOGGER.info(f"Auto reconnect time configured for {self._auto_reconnect_time}")
-            except Exception as err:
-                _LOGGER.error(f"Error parsing auto reconnect time: {err}")
+        _LOGGER.info(
+            "Automatic reconnect scheduled daily at %02d:%02d:%02d local time",
+            reconnect_time.hour, reconnect_time.minute, reconnect_time.second,
+        )
     
-    @callback
     async def _handle_auto_reconnect(self, _now: Optional[datetime] = None) -> None:
         """Handle scheduled automatic reconnection."""
         current_time = dt_util.utcnow()
@@ -329,34 +331,33 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
         await self._perform_recovery(is_scheduled=True)
     
     async def stop_heartbeat(self) -> None:
-        """Stop the heartbeat service."""
+        """Cancel the heartbeat + auto-reconnect + retry timers."""
         if self._heartbeat_unsub is not None:
             self._heartbeat_unsub()
             self._heartbeat_unsub = None
             _LOGGER.debug("ByteWatt heartbeat monitoring stopped")
-        
-        # Also stop auto reconnect
         if self._auto_reconnect_unsub is not None:
             self._auto_reconnect_unsub()
             self._auto_reconnect_unsub = None
-        
-        # And webhook if registered
-        if self._webhook_unsub is not None:
-            self._webhook_unsub()
-            self._webhook_unsub = None
+        if self._recovery_retry_unsub is not None:
+            self._recovery_retry_unsub()
+            self._recovery_retry_unsub = None
     
-    @callback
     async def _async_heartbeat_check(self, _now: Optional[datetime] = None) -> None:
-        """Check if the integration is still alive and recover if needed."""
-        # Convert callback to a normal async function
+        """Check if the integration is still alive and recover if needed.
+
+        Registered via async_track_time_interval, which awaits coroutine
+        handlers — do NOT decorate with @callback (that marks it sync).
+        """
         await self._check_and_recover(_now)
     
     async def _check_and_recover(self, _now: Optional[datetime] = None) -> None:
-        """Internal method to check data freshness and recover if needed."""
-        # Skip check if recovery is already in progress
-        if self._recovery_in_progress:
-            return
-        
+        """Internal method to check data freshness and recover if needed.
+
+        The actual re-entrancy guard lives in _perform_recovery so all
+        callers (heartbeat, auto-reconnect timer, force_reconnect service)
+        are equally protected.
+        """
         current_time = dt_util.utcnow()
         
         # Log heartbeat check in diagnostics
@@ -406,109 +407,123 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
             self._consecutive_stale_checks = 0
     
     async def _perform_recovery(self, is_scheduled: bool = False) -> None:
-        """Perform recovery actions when data updates have stopped."""
+        """Perform recovery actions when data updates have stopped.
+
+        Re-entrancy guard lives HERE (not just in _check_and_recover) because
+        three call sites can invoke this directly: heartbeat-via-_check_and_
+        recover, the 24 h auto-reconnect timer, and the force_reconnect service.
+        Without an early return here, two concurrent recoveries could race
+        client.initialize(), circuit_breaker.reset(), and async_refresh().
+
+        Success is verified by checking that the refresh actually advanced
+        _last_successful_update — without that, a refresh that fell back to
+        cached data (UpdateFailed swallowed in _async_update_data) would
+        spuriously report "successfully reconnected" to the user.
+        """
+        if self._recovery_in_progress:
+            _LOGGER.debug("Recovery already in progress — skipping duplicate trigger")
+            return
         self._recovery_in_progress = True
         self._recovery_attempts += 1
-        
+
         recovery_type = "scheduled" if is_scheduled else "automatic"
-        _LOGGER.warning(f"Performing ByteWatt integration {recovery_type} recovery (attempt {self._recovery_attempts})")
-        
-        # Record recovery attempt in diagnostics
-        recovery_timestamp = dt_util.utcnow()
+        _LOGGER.warning(
+            "Performing ByteWatt integration %s recovery (attempt %d)",
+            recovery_type, self._recovery_attempts,
+        )
+
+        recovery_start_ts = dt_util.utcnow()
+        last_update_before = self._last_successful_update
         self.diagnostic_service.log_diagnostic("recovery_attempt", {
             "attempt": self._recovery_attempts,
             "type": recovery_type,
-            "timestamp": recovery_timestamp.isoformat()
+            "timestamp": recovery_start_ts.isoformat(),
         })
-        
-        # Create notification about recovery attempt if enabled
+
         if self._notify_on_recovery:
-            try:
-                message = f"ByteWatt integration is attempting to reconnect ({recovery_type} recovery)"
-                await self.hass.components.persistent_notification.async_create(
-                    message,
-                    title="ByteWatt Recovery",
-                    notification_id=NOTIFICATION_RECOVERY
-                )
-            except (AttributeError, TypeError) as e:
-                _LOGGER.error(f"Could not create recovery notification: {e}")
-        
+            async_create(
+                self.hass,
+                f"ByteWatt integration is attempting to reconnect ({recovery_type} recovery)",
+                title="ByteWatt Recovery",
+                notification_id=NOTIFICATION_RECOVERY,
+            )
+
         try:
-            # Step 1: Reset circuit breaker to allow recovery attempts
-            _LOGGER.debug("Resetting circuit breaker for recovery")
             self.circuit_breaker.reset()
-            
-            # Step 2: Network diagnostics (if diagnostics enabled)
+
             if self.diagnostic_service.diagnostics_enabled:
                 network_status = await self.hass.async_add_executor_job(self._check_network)
                 self.diagnostic_service.log_diagnostic("network_check", network_status)
-            
-            # Step 3: Reset client state
+
             with self._timed_operation("reset_client"):
                 await self._reset_client()
-            
-            # Step 4: Force immediate data refresh
+
             with self._timed_operation("refresh_data"):
                 await self.async_refresh()
-            
-            # Recovery succeeded
-            _LOGGER.info("ByteWatt integration recovery completed successfully")
-            
-            # Record success in diagnostics
-            success_timestamp = dt_util.utcnow()
-            self.diagnostic_service.log_diagnostic("recovery_result", {
-                "success": True,
-                "timestamp": success_timestamp.isoformat()
-            })
-            
-            # Update notification if enabled
-            if self._notify_on_recovery:
-                try:
-                    await self.hass.components.persistent_notification.async_dismiss(NOTIFICATION_RECOVERY)
-                    await self.hass.components.persistent_notification.async_create(
+
+            # Did the refresh actually succeed, or did _async_update_data fall
+            # back to cached data and swallow the failure?
+            recovered = (
+                self._last_successful_update is not None
+                and (last_update_before is None
+                     or self._last_successful_update > last_update_before)
+            )
+            if recovered:
+                _LOGGER.info("ByteWatt integration recovery completed successfully")
+                self.diagnostic_service.log_diagnostic("recovery_result", {
+                    "success": True,
+                    "timestamp": dt_util.utcnow().isoformat(),
+                })
+                if self._notify_on_recovery:
+                    async_dismiss(self.hass, NOTIFICATION_RECOVERY)
+                    async_create(
+                        self.hass,
                         "ByteWatt integration successfully reconnected to the API",
                         title="ByteWatt Recovery Success",
-                        notification_id=NOTIFICATION_RECOVERY
+                        notification_id=NOTIFICATION_RECOVERY,
                     )
-                except (AttributeError, TypeError) as e:
-                    _LOGGER.error(f"Could not update recovery notification: {e}")
+            else:
+                # Refresh "completed" without advancing last_successful_update
+                # — the API is still broken. Surface as a failure.
+                raise UpdateFailed(
+                    "Recovery refresh did not advance last_successful_update "
+                    "(API still returning errors or no data)"
+                )
         except Exception as err:
-            _LOGGER.error(f"ByteWatt recovery failed: {err}")
-            
-            # Record failure in diagnostics
-            failure_timestamp = dt_util.utcnow()
+            _LOGGER.error("ByteWatt recovery failed: %s", err)
             self.diagnostic_service.log_diagnostic("recovery_result", {
                 "success": False,
                 "error": str(err),
                 "error_type": type(err).__name__,
-                "timestamp": failure_timestamp.isoformat()
+                "timestamp": dt_util.utcnow().isoformat(),
             })
-            
-            # Apply exponential backoff for retry frequency based on attempt count
-            backoff_factor = min(5, self._recovery_attempts)  # Cap at 5x
-            next_check_seconds = self._heartbeat_interval // backoff_factor
-            
-            _LOGGER.info(f"Will attempt recovery again in {next_check_seconds} seconds")
-            
-            # Update notification if enabled
+
+            backoff_factor = min(5, self._recovery_attempts)
+            next_check_seconds = max(self._heartbeat_interval // backoff_factor, 30)
+            _LOGGER.info("Will attempt recovery again in %ds", next_check_seconds)
+
             if self._notify_on_recovery:
-                try:
-                    await self.hass.components.persistent_notification.async_create(
-                        f"ByteWatt recovery attempt failed: {err}. Will retry in {next_check_seconds} seconds.",
-                        title="ByteWatt Recovery Failed",
-                        notification_id=NOTIFICATION_RECOVERY
-                    )
-                except (AttributeError, TypeError) as e:
-                    _LOGGER.error(f"Could not update failure notification: {e}")
-            
-            # Schedule a sooner check if needed
+                async_create(
+                    self.hass,
+                    f"ByteWatt recovery attempt failed: {err}. "
+                    f"Will retry in {next_check_seconds} seconds.",
+                    title="ByteWatt Recovery Failed",
+                    notification_id=NOTIFICATION_RECOVERY,
+                )
+
+            # Schedule a sooner retry. Cancel any previous retry first so
+            # back-to-back failures don't queue multiple callbacks, and
+            # store the unsubscribe so unload can cancel it cleanly.
             if backoff_factor > 1:
-                async_call_later = getattr(self.hass, "async_call_later", None)
-                if async_call_later:
-                    async_call_later(
-                        next_check_seconds, 
-                        lambda _: asyncio.create_task(self._check_and_recover(None))
-                    )
+                if self._recovery_retry_unsub is not None:
+                    self._recovery_retry_unsub()
+                self._recovery_retry_unsub = async_call_later(
+                    self.hass,
+                    next_check_seconds,
+                    lambda _now: self.hass.async_create_task(
+                        self._check_and_recover(None)
+                    ),
+                )
         finally:
             self._recovery_in_progress = False
     
