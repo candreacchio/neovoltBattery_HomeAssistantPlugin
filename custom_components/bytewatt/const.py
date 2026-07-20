@@ -113,6 +113,10 @@ FEEDIN_MAX_SLOTS = 6
 # and entity slider max.
 FEEDIN_MAX_POWER_W = 20000
 
+# Default charge power (watts) applied when auto-creating a charge slot that
+# the inverter did not return. Matches the charge-power slider max in number.py.
+DEFAULT_CHARGE_POWER_W = 10000
+
 
 def signal_pending_changed(entry_id: str) -> str:
     """Dispatcher signal name for pending-store changes on a given entry."""

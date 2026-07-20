@@ -40,8 +40,8 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
 from .api.settings import BatterySettingsAPI, GridFeedInSettingsAPI
-from .const import signal_pending_changed
-from .models import CycleStrategy, GridFeedInSettings, GridFeedInSlot
+from .const import DEFAULT_CHARGE_POWER_W, signal_pending_changed
+from .models import ChargeSlot, CycleStrategy, GridFeedInSettings, GridFeedInSlot
 from .utilities.time_utils import sanitize_time_format
 
 _LOGGER = logging.getLogger(__name__)
@@ -691,9 +691,7 @@ class SettingsManager:
             merged.bat_use_cap = float(pending["minimum_soc"])
         if "charge_cap" in pending:
             if not merged.charge_slots:
-                raise SettingsValidationError(
-                    "Cannot set charge_cap: no charge slot defined on the inverter"
-                )
+                merged.charge_slots.append(ChargeSlot(charge_power=DEFAULT_CHARGE_POWER_W))
             merged.charge_slots[0].charge_limit = float(pending["charge_cap"])
         if "grid_charging" in pending:
             merged.grid_charge_cycle = 1 if pending["grid_charging"] else 0
@@ -709,14 +707,17 @@ class SettingsManager:
             if field_name in pending:
                 slots = getattr(merged, slot_list_attr)
                 if not slots:
-                    raise SettingsValidationError(
-                        f"Cannot set {field_name}: no slot defined on the inverter"
-                    )
+                    if slot_list_attr == "charge_slots":
+                        slots.append(ChargeSlot(charge_power=DEFAULT_CHARGE_POWER_W))
+                    else:
+                        raise SettingsValidationError(
+                            f"Cannot set {field_name}: no slot defined on the inverter"
+                        )
                 setattr(slots[0], slot_attr, pending[field_name])
 
         if "charge_power" in pending:
             if not merged.charge_slots:
-                raise SettingsValidationError("Cannot set charge_power: no charge slot")
+                merged.charge_slots.append(ChargeSlot(charge_power=DEFAULT_CHARGE_POWER_W))
             merged.charge_slots[0].charge_power = int(pending["charge_power"])
         if "discharge_power" in pending:
             if not merged.discharge_slots:
