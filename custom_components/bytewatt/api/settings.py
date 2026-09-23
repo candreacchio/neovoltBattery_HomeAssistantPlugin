@@ -33,10 +33,10 @@ async def _with_relogin(api_client: "NeovoltClient", op):
 
 
 class BatterySettingsAPI:
-    """Stateless transport for getCycleStrategy / setCycleStrategy."""
+    """Stateless transport for the current battery charge-config API."""
 
-    GET_ENDPOINT = "api/iterate/sysSet/getCycleStrategy?id="
-    PUT_ENDPOINT = "api/iterate/sysSet/setCycleStrategy"
+    GET_ENDPOINT = "api/iterate/sysSet/getChargeConfigInfo?id="
+    PUT_ENDPOINT = "api/iterate/sysSet/updateChargeConfigInfo"
 
     def __init__(self, api_client: "NeovoltClient") -> None:
         self._client = api_client
@@ -61,19 +61,131 @@ class BatterySettingsAPI:
             self._client._warned_empty_host_id = True
         return host_id
 
+    @staticmethod
+    def _from_charge_config(data, system_id: str) -> CycleStrategy:
+        """Translate the current charge-config response into CycleStrategy."""
+
+        # CycleStrategy already contains the parsing logic for charge and
+        # discharge slots. The current API uses different field names, so
+        # translate those names to the model's existing API representation.
+        model_data = {
+            "gridChargeCycle": data.get("gridCharge", 1),
+            "ctrDisCycle": data.get("ctrDis", 0),
+            "batUseCap": data.get("batUseCap", 10),
+            "executeCycleType": data.get("chargeModeSetting", 0),
+            "upsReserve": data.get("upsReserve", 0),
+            "loadcutoutEn": data.get("loadcutoutEn", 0),
+            "cutoffSoc": data.get("cutoffSoc", 0),
+            "wakeupSoc": data.get("wakeupSoc", 0),
+            "isSupportDischargeSoc": data.get(
+                "isSupportOffGridSocControl", True
+            ),
+            "isSupportChargerPower": True,
+            "poinv": data.get("poinv", 10000),
+
+            "dayChargeTimeList": [
+                {
+                    "beginTime": data.get("timeChaf1", "00:00"),
+                    "endTime": data.get("timeChae1", "00:00"),
+                    "chargeLimit": data.get("batHighCap", 100),
+                    "chargePower": 8000,
+                    "sort": 1,
+                },
+                {
+                    "beginTime": data.get("timeChaf2", "00:00"),
+                    "endTime": data.get("timeChae2", "00:00"),
+                    "chargeLimit": data.get("batHighCap", 100),
+                    "chargePower": 8000,
+                    "sort": 2,
+                },
+            ],
+
+            "dayDischargeTimeList": [
+                {
+                    "beginTime": data.get("timeDisf1", "00:00"),
+                    "endTime": data.get("timeDise1", "00:00"),
+                    "chargeLimit": data.get("batUseCap", 10),
+                    "chargePower": 10000,
+                    "sort": 1,
+                },
+                {
+                    "beginTime": data.get("timeDisf2", "00:00"),
+                    "endTime": data.get("timeDise2", "00:00"),
+                    "chargeLimit": data.get("batUseCap", 10),
+                    "chargePower": 10000,
+                    "sort": 2,
+                },
+            ],
+        }
+
+        settings = CycleStrategy.from_api_response(model_data)
+        settings.raw_data = dict(data)
+        settings.host_system_id = system_id
+        return settings
+
+    @staticmethod
+    def _to_charge_config(settings: CycleStrategy, system_id: str):
+        """Translate CycleStrategy back to the current charge-config API."""
+
+        # Start with the complete GET response. This preserves fields that
+        # the integration does not expose, such as battery model information,
+        # reserve settings, and firmware-dependent options.
+        payload = dict(settings.raw_data)
+        payload["id"] = system_id
+
+        payload["gridCharge"] = settings.grid_charge_cycle
+        payload["ctrDis"] = settings.ctr_dis_cycle
+        payload["batUseCap"] = settings.bat_use_cap
+
+        if settings.charge_slots:
+            slot = settings.charge_slots[0]
+            payload["timeChaf1"] = slot.begin_time
+            payload["timeChae1"] = slot.end_time
+            payload["batHighCap"] = slot.charge_limit
+
+        if len(settings.charge_slots) > 1:
+            slot = settings.charge_slots[1]
+            payload["timeChaf2"] = slot.begin_time
+            payload["timeChae2"] = slot.end_time
+
+        if settings.discharge_slots:
+            slot = settings.discharge_slots[0]
+            payload["timeDisf1"] = slot.begin_time
+            payload["timeDise1"] = slot.end_time
+
+        if len(settings.discharge_slots) > 1:
+            slot = settings.discharge_slots[1]
+            payload["timeDisf2"] = slot.begin_time
+            payload["timeDise2"] = slot.end_time
+
+        payload["upsReserve"] = settings.ups_reserve
+        payload["loadcutoutEn"] = settings.loadcutout_en
+        payload["cutoffSoc"] = settings.cutoff_soc
+        payload["wakeupSoc"] = settings.wakeup_soc
+
+        return payload
+
     async def fetch_current_settings(
         self,
         max_retries: int = DEFAULT_RETRIES,
         retry_delay: float = DEFAULT_RETRY_DELAY,
     ) -> Optional[CycleStrategy]:
         endpoint = f"{self.GET_ENDPOINT}{self._host_id()}"
+
         for attempt in range(max_retries):
-            response = await _with_relogin(self._client, lambda: self._client._async_get(endpoint))
+            response = await _with_relogin(
+                self._client,
+                lambda: self._client._async_get(endpoint),
+            )
+
             if response and response.get("code") == 200 and "data" in response:
-                settings = CycleStrategy.from_api_response(response["data"])
-                settings.host_system_id = self._host_id()
+                settings = self._from_charge_config(
+                    response["data"],
+                    self._host_id(),
+                )
+
                 _LOGGER.debug(
-                    "Fetched cycle strategy (id=%s): batUseCap=%.0f%%, "
+                    "Fetched charge config (id=%s): batUseCap=%.0f%%, "
                     "%d charge slot(s), %d discharge slot(s)",
                     self._host_id(),
                     settings.bat_use_cap,
@@ -81,12 +193,17 @@ class BatterySettingsAPI:
                     len(settings.discharge_slots),
                 )
                 return settings
+
             _LOGGER.debug(
-                "Cycle strategy fetch attempt %d/%d returned: %s",
-                attempt + 1, max_retries, response,
+                "Charge config fetch attempt %d/%d returned: %s",
+                attempt + 1,
+                max_retries,
+                response,
             )
+
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
+
         return None
 
     async def put(
@@ -95,27 +212,35 @@ class BatterySettingsAPI:
         max_retries: int = DEFAULT_RETRIES,
         retry_delay: float = DEFAULT_RETRY_DELAY,
     ) -> bool:
-        payload = settings.to_dict()
-        payload["id"] = self._host_id()
+        payload = self._to_charge_config(settings, self._host_id())
+
         for attempt in range(max_retries):
             response = await _with_relogin(
-                self._client, lambda: self._client._async_put(self.PUT_ENDPOINT, payload)
+                self._client,
+                lambda: self._client._async_put(
+                    self.PUT_ENDPOINT,
+                    payload,
+                ),
             )
-            if response and response.get("code") == 200 and response.get("msg") == "Success":
+
+            if response and response.get("code") == 200:
                 return True
-            # Code 9007 is a transient server-side network exception; retry with backoff
+
             if response and response.get("code") == 9007:
                 _LOGGER.warning(
-                    "setCycleStrategy transient error 9007 (attempt %d/%d), retrying",
+                    "updateChargeConfigInfo transient error 9007 (attempt %d/%d), retrying",
                     attempt + 1, max_retries,
                 )
             else:
                 _LOGGER.debug(
-                    "setCycleStrategy attempt %d/%d returned: %s",
-                    attempt + 1, max_retries, response,
+                    "updateChargeConfigInfo attempt %d/%d returned: %s",
+                    attempt + 1, max_retries,
+                    response,
                 )
+
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
+
         return False
 
 
@@ -123,7 +248,7 @@ class GridFeedInSettingsAPI:
     """Stateless transport for getFeedStrategyList / saveFeedStrategy."""
 
     GET_ENDPOINT = "api/iterate/sysSet/getFeedStrategyList?id="
-    POST_ENDPOINT = "api/iterate/sysSet/saveFeedStrategy"
+    POST_ENDPOINT = "api/iterate/sysSet/v2/saveFeedStrategy"
 
     def __init__(self, api_client: "NeovoltClient") -> None:
         self._client = api_client
@@ -175,6 +300,7 @@ class GridFeedInSettingsAPI:
             )
             if response and response.get("code") == 200:
                 return True
+
             if response and response.get("code") == 9007:
                 _LOGGER.warning(
                     "saveFeedStrategy transient error 9007 (attempt %d/%d), retrying",
@@ -183,8 +309,10 @@ class GridFeedInSettingsAPI:
             else:
                 _LOGGER.debug(
                     "saveFeedStrategy attempt %d/%d returned: %s",
-                    attempt + 1, max_retries, response,
+                    attempt + 1, max_retries,
+                    response,
                 )
+
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
         return False
