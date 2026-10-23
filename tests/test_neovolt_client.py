@@ -29,7 +29,7 @@ def _load_module(rel_path: str, name: str):
 # skip cleanly when HA isn't installed (bare sandbox).
 try:
     neovolt_auth = _load_module("api/neovolt_auth.py", "bytewatt_neovolt_auth")
-    neovolt_client = _load_module("api/neovolt_client.py", "bytewatt_neovolt_client")
+    from custom_components.bytewatt.api import neovolt_client
 except ModuleNotFoundError as exc:
     pytest.skip(f"Module not installed in this environment: {exc.name}", allow_module_level=True)
 
