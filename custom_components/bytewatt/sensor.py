@@ -42,6 +42,7 @@ from .const import (
     SENSOR_CO2_REDUCTION,
     SENSOR_TOTAL_BATTERY_DISCHARGE,
 )
+from .stacks import ROLE_HOST, derive_stack_state
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -330,7 +331,15 @@ async def async_setup_entry(
         ),
     ]
     
-    async_add_entities(soc_sensors + grid_sensors + daily_stats_sensors)
+    stacks = (coordinator.data or {}).get("battery", {}).get("stacks", {})
+    stack_sensors: list[SensorEntity] = []
+    for sys_sn, stack in stacks.items():
+        label = "Host" if stack.get("role") == ROLE_HOST else f"Follower {sys_sn}"
+        stack_sensors.append(ByteWattStackSocSensor(coordinator, entry, sys_sn, label))
+        stack_sensors.append(ByteWattStackPowerSensor(coordinator, entry, sys_sn, label))
+        stack_sensors.append(ByteWattStackStateSensor(coordinator, entry, sys_sn, label))
+
+    async_add_entities(soc_sensors + grid_sensors + daily_stats_sensors + stack_sensors)
 
 
 class ByteWattSensor(CoordinatorEntity, SensorEntity):
@@ -612,3 +621,126 @@ class ByteWattLastUpdateSensor(ByteWattSensor):
     def available(self) -> bool:
         """Return if entity is available."""
         return hasattr(self.coordinator, '_last_successful_update') and self.coordinator._last_successful_update is not None
+
+
+class _ByteWattStackSensorBase(CoordinatorEntity, SensorEntity):
+    """Shared lookup for one inverter's own battery stack.
+
+    Each physical stack (Host or a Follower) can only be charged/discharged
+    by its own inverter, so automations need per-stack state rather than
+    the blended bank SOC. ``coordinator.data["battery"]["stacks"][sys_sn]``
+    is absent whenever this cycle's data couldn't be derived (not merely
+    zero) — entities go unavailable rather than reporting 0 in that case.
+    """
+
+    def __init__(self, coordinator, config_entry: ConfigEntry, sys_sn: str, key: str):
+        super().__init__(coordinator)
+        self._config_entry = config_entry
+        self._sys_sn = sys_sn
+        self._attr_unique_id = f"{config_entry.entry_id}_stack_{key}_{sys_sn}"
+
+    @property
+    def device_info(self):
+        username = self._config_entry.data.get("username", "Unknown") if self._config_entry.data else "Unknown"
+        return {
+            "identifiers": {(DOMAIN, self._config_entry.entry_id)},
+            "name": f"Byte-Watt Battery ({username})",
+            "manufacturer": "Byte-Watt",
+            "model": "Battery Monitor",
+        }
+
+    def _stack_data(self) -> Optional[Dict[str, Any]]:
+        if not self.coordinator.data or "battery" not in self.coordinator.data:
+            return None
+        stacks = self.coordinator.data["battery"].get("stacks")
+        if not stacks:
+            return None
+        return stacks.get(self._sys_sn)
+
+
+class ByteWattStackSocSensor(_ByteWattStackSensorBase):
+    """Per-stack SOC (%) — the SOC of just the battery this inverter can act on."""
+
+    def __init__(self, coordinator, config_entry: ConfigEntry, sys_sn: str, label: str):
+        super().__init__(coordinator, config_entry, sys_sn, "soc")
+        self._attr_name = f"{label} Stack Battery"
+        self._attr_device_class = SensorDeviceClass.BATTERY
+        self._attr_native_unit_of_measurement = "%"
+        self._attr_icon = "mdi:battery-high"
+
+    @property
+    def native_value(self):
+        stack = self._stack_data()
+        return stack.get("soc") if stack else None
+
+    @property
+    def available(self) -> bool:
+        return self.native_value is not None
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        stack = self._stack_data() or {}
+        return {
+            "sysSn": self._sys_sn,
+            "capacity_kwh": stack.get("capacity_kwh"),
+            "energy_kwh": stack.get("energy_kwh"),
+            "sample_time": stack.get("sample_time"),
+        }
+
+
+class ByteWattStackPowerSensor(_ByteWattStackSensorBase):
+    """Per-stack inverter AC power (W) — negative means that inverter is charging."""
+
+    def __init__(self, coordinator, config_entry: ConfigEntry, sys_sn: str, label: str):
+        super().__init__(coordinator, config_entry, sys_sn, "power")
+        self._attr_name = f"{label} Stack Power"
+        self._attr_device_class = SensorDeviceClass.POWER
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = "W"
+        self._attr_icon = "mdi:transmission-tower"
+
+    @property
+    def native_value(self):
+        stack = self._stack_data()
+        return stack.get("power_w") if stack else None
+
+    @property
+    def available(self) -> bool:
+        return self.native_value is not None
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        return {"sysSn": self._sys_sn}
+
+
+STACK_STATE_OPTIONS = ["full", "charging", "discharging", "empty"]
+
+
+class ByteWattStackStateSensor(_ByteWattStackSensorBase):
+    """Derived full/charging/discharging/empty state for one stack.
+
+    Useful because a stack reading full or empty caps its inverter's
+    charge/discharge power well before the blended bank SOC would suggest.
+    """
+
+    def __init__(self, coordinator, config_entry: ConfigEntry, sys_sn: str, label: str):
+        super().__init__(coordinator, config_entry, sys_sn, "state")
+        self._attr_name = f"{label} Stack State"
+        self._attr_device_class = SensorDeviceClass.ENUM
+        self._attr_options = STACK_STATE_OPTIONS
+        self._attr_icon = "mdi:battery-sync"
+
+    @property
+    def native_value(self):
+        stack = self._stack_data()
+        if stack is None:
+            return None
+        return derive_stack_state(stack.get("soc"), stack.get("power_w"))
+
+    @property
+    def available(self) -> bool:
+        return self.native_value is not None
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        return {"sysSn": self._sys_sn}

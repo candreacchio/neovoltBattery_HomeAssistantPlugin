@@ -10,11 +10,24 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
 from .neovolt_auth import EncryptionError, encrypt_password
+from ..stacks import (
+    ROLE_FOLLOWER,
+    ROLE_HOST,
+    StackSocSample,
+    derive_stack_capacities,
+    detect_roles,
+    pick_latest_stack_soc,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30
 DEFAULT_BASE_URL = "https://monitor.byte-watt.com"
+
+# staticsByDay is a ~40KB five-minute-resolution response — polling it on
+# every fast coordinator tick would be wasteful and gains nothing, since
+# the underlying data only changes every 5 minutes anyway.
+STACK_SOC_POLL_INTERVAL = timedelta(minutes=5)
 
 # Max number of times async_get_battery_data / async_get_device_list will
 # re-login and retry after a session-expiry / 401 response. One retry is
@@ -106,10 +119,21 @@ class NeovoltClient:
         self.base_url = base_url
         self.session = async_get_clientsession(hass)
         self.token: Optional[str] = None
+        self.user_id: Optional[str] = None
         self.host_system_id = host_system_id   # systemId of the Host inverter
         self.host_sys_sn = host_sys_sn         # sysSn of the Host inverter
         # Battery settings API variant, detected by BatterySettingsAPI
         self.settings_api_variant: Optional[str] = None
+        # Cached side-effect of the Host's getLastPowerData call made for the
+        # bank-SOC override below — reused for the Host's own stack power so
+        # per-stack data doesn't need a second call to the same endpoint.
+        self._last_host_inverter_data: Optional[Dict[str, Any]] = None
+        # sysSn -> (fetched_at, StackSocSample); throttles staticsByDay to
+        # STACK_SOC_POLL_INTERVAL regardless of how often the coordinator polls.
+        self._stack_soc_cache: Dict[str, tuple[datetime, StackSocSample]] = {}
+        # (fetched_at, inverter list) from getCustomMenuEssList — roles and
+        # capacities change rarely, so this is reused for an hour at a time.
+        self._inverter_list_cache: Optional[tuple[datetime, list]] = None
 
     async def async_login(self) -> bool:
         """Login to the Neovolt API using encrypted password."""
@@ -173,6 +197,13 @@ class NeovoltClient:
                     else:
                         _LOGGER.error("No token found in login response")
                         return False
+
+                    # userId is required by staticsByDay; best-effort only —
+                    # the per-stack SOC calls simply fail gracefully without it.
+                    if "userId" in result:
+                        self.user_id = result["userId"]
+                    elif "data" in result and result["data"] and "userId" in result["data"]:
+                        self.user_id = result["data"]["userId"]
 
                     _LOGGER.debug("Successfully logged in to Neovolt API")
                     return True
@@ -316,6 +347,10 @@ class NeovoltClient:
                             host_soc, battery_data.get("soc"),
                         )
                     battery_data["soc"] = host_soc
+
+                stacks = await self._async_build_stack_data(headers)
+                if stacks:
+                    battery_data["stacks"] = stacks
 
             # Now get the energy statistics
             stats_url = f"{self.base_url}/api/report/energy/getEnergyStatistics"
@@ -528,7 +563,14 @@ class NeovoltClient:
 
         Best effort: returns None on any failure so the caller keeps the
         ``sysSn=All`` value.
+
+        As a side effect, caches the full response under
+        ``_last_host_inverter_data`` so the per-stack Host power reading
+        (prealL1) can reuse this same call instead of firing a second
+        request to the same endpoint. Cleared on failure so a stale
+        reading is never reused as if it were fresh.
         """
+        self._last_host_inverter_data = None
         url = f"{self.base_url}/api/report/energyStorage/getLastPowerData"
         params = {"sysSn": self.host_sys_sn, "stationId": ""}
         try:
@@ -547,10 +589,170 @@ class NeovoltClient:
         if result is None or result.get("code") not in (0, 200):
             _LOGGER.debug("Host getLastPowerData failed: %s", result)
             return None
-        soc = (result.get("data") or {}).get("soc")
+        data = result.get("data") or {}
+        self._last_host_inverter_data = data
+        soc = data.get("soc")
         if isinstance(soc, bool) or not isinstance(soc, (int, float)):
             return None
         return soc
+
+    async def _async_get_inverter_power(
+        self, sys_sn: str, headers: Dict[str, str]
+    ) -> Optional[float]:
+        """Read one inverter's own AC power (prealL1, W) from getLastPowerData.
+
+        Negative = charging. Used for Follower inverters, which don't have
+        a cached response from a prior call the way the Host does.
+        Best effort: returns None on any failure.
+        """
+        url = f"{self.base_url}/api/report/energyStorage/getLastPowerData"
+        params = {"sysSn": sys_sn, "stationId": ""}
+        try:
+            async with asyncio.timeout(DEFAULT_TIMEOUT):
+                async with self.session.get(
+                    url=url, params=params, headers=headers,
+                ) as response:
+                    if response.status != 200:
+                        _LOGGER.debug("getLastPowerData(%s) HTTP %s", sys_sn, response.status)
+                        return None
+                    result = await _decode_json_object(response, f"getLastPowerData ({sys_sn})")
+        except (asyncio.TimeoutError, aiohttp.ClientError, ValueError) as error:
+            _LOGGER.debug("Error fetching power data for %s: %s", sys_sn, error)
+            return None
+
+        if result is None or result.get("code") not in (0, 200):
+            _LOGGER.debug("getLastPowerData(%s) failed: %s", sys_sn, result)
+            return None
+        power = (result.get("data") or {}).get("prealL1")
+        if isinstance(power, bool) or not isinstance(power, (int, float)):
+            return None
+        return power
+
+    async def _async_get_statics_by_day(
+        self, sys_sn: str, date: str, headers: Dict[str, str]
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch one day's staticsByDay response for one inverter.
+
+        Returns the raw ``data`` object (5-minute-resolution arrays plus
+        ``lasIdx``), or None on any failure.
+        """
+        url = f"{self.base_url}/api/report/power/staticsByDay"
+        params = {"userId": self.user_id or "", "date": date, "sysSn": sys_sn}
+        try:
+            async with asyncio.timeout(DEFAULT_TIMEOUT):
+                async with self.session.get(
+                    url=url, params=params, headers=headers,
+                ) as response:
+                    if response.status != 200:
+                        _LOGGER.debug("staticsByDay(%s, %s) HTTP %s", sys_sn, date, response.status)
+                        return None
+                    result = await _decode_json_object(response, f"staticsByDay ({sys_sn})")
+        except (asyncio.TimeoutError, aiohttp.ClientError, ValueError) as error:
+            _LOGGER.debug("Error fetching staticsByDay for %s: %s", sys_sn, error)
+            return None
+
+        if result is None or result.get("code") not in (0, 200):
+            _LOGGER.debug("staticsByDay(%s, %s) failed: %s", sys_sn, date, result)
+            return None
+        return result.get("data") or {}
+
+    async def async_get_stack_soc(
+        self, sys_sn: str, headers: Dict[str, str]
+    ) -> Optional[StackSocSample]:
+        """Return the latest per-stack SOC sample for one inverter's sysSn.
+
+        Throttled to STACK_SOC_POLL_INTERVAL: a call within that window of
+        the last successful fetch returns the cached sample instead of
+        re-querying staticsByDay, since the underlying data only has
+        5-minute resolution anyway. A failed or empty fetch is NOT cached
+        — it returns None so the caller can treat the stack as unavailable
+        for this cycle, and retries on the next call rather than waiting
+        out the full throttle window.
+        """
+        now = dt_util.now()
+        cached = self._stack_soc_cache.get(sys_sn)
+        if cached is not None and (now - cached[0]) < STACK_SOC_POLL_INTERVAL:
+            return cached[1]
+
+        today = now.strftime("%Y-%m-%d")
+        data = await self._async_get_statics_by_day(sys_sn, today, headers)
+        sample = pick_latest_stack_soc(data) if data else None
+
+        if sample is None:
+            # Just after midnight, today's array may have no filled slots
+            # yet — fall back to yesterday's last valid point.
+            yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            data = await self._async_get_statics_by_day(sys_sn, yesterday, headers)
+            sample = pick_latest_stack_soc(data) if data else None
+
+        if sample is not None:
+            self._stack_soc_cache[sys_sn] = (now, sample)
+        return sample
+
+    async def async_get_inverter_list_cached(
+        self, max_age: timedelta = timedelta(hours=1)
+    ) -> list:
+        """Return getCustomMenuEssList's inverter list, cached for ``max_age``.
+
+        Roles (parallelGridMode) and capacities (cobat) change only when
+        the user reconfigures their hardware, so there is no need to
+        re-fetch this on every poll.
+        """
+        now = dt_util.now()
+        if self._inverter_list_cache is not None:
+            fetched_at, inverters = self._inverter_list_cache
+            if (now - fetched_at) < max_age:
+                return inverters
+
+        inverters = await self.fetch_inverter_list()
+        if inverters:
+            self._inverter_list_cache = (now, inverters)
+        return inverters
+
+    async def _async_build_stack_data(self, headers: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
+        """Build per-stack SOC/power/capacity info for the Host + every Follower.
+
+        Returns an empty dict if stack capacities can't be derived (e.g.
+        getCustomMenuEssList failed, or the Host's cobat can't be read) —
+        callers should treat that as "per-stack data unavailable this
+        cycle", not guess a capacity.
+        """
+        if not self.host_sys_sn:
+            return {}
+
+        inverters = await self.async_get_inverter_list_cached()
+        if not inverters:
+            return {}
+
+        capacities = derive_stack_capacities(inverters, self.host_sys_sn)
+        if not capacities:
+            return {}
+        roles = detect_roles(inverters)
+
+        stacks: Dict[str, Dict[str, Any]] = {}
+        for sys_sn, capacity_kwh in capacities.items():
+            sample = await self.async_get_stack_soc(sys_sn, headers)
+
+            if sys_sn == self.host_sys_sn:
+                # Reuse the Host getLastPowerData call already made above
+                # for the bank SOC override — no second request needed.
+                power = (self._last_host_inverter_data or {}).get("prealL1")
+                if isinstance(power, bool) or not isinstance(power, (int, float)):
+                    power = None
+            else:
+                power = await self._async_get_inverter_power(sys_sn, headers)
+
+            energy_kwh = round(sample.soc / 100 * capacity_kwh, 2) if sample else None
+            default_role = ROLE_HOST if sys_sn == self.host_sys_sn else ROLE_FOLLOWER
+            stacks[sys_sn] = {
+                "role": roles.get(sys_sn, default_role),
+                "capacity_kwh": capacity_kwh,
+                "soc": sample.soc if sample else None,
+                "sample_time": sample.time if sample else None,
+                "energy_kwh": energy_kwh,
+                "power_w": power,
+            }
+        return stacks
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get the authentication headers."""
