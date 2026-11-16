@@ -39,7 +39,8 @@
       "init": {
         "title": "Byte-Watt Options",
         "data": {
-          "scan_interval": "Scan interval (seconds)"
+          "scan_interval": "Scan interval (seconds)",
+          "inverter_list_interval": "Inverter status check interval (minutes)"
         }
       }
     }
@@ -48,6 +49,20 @@
     "host_inverter_required": {
       "title": "Host inverter not configured",
       "description": "This Byte-Watt account has more than one inverter and no Host inverter has been selected. Grid Feed-in controls will not work until a Host is picked. Open Settings → Devices & Services, find the Byte-Watt entry, click the three-dot menu and choose Reconfigure."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "inverter_status": {
+        "name": "Status",
+        "state": {
+          "normal": "Normal",
+          "fault": "Fault",
+          "offline": "Offline",
+          "protection": "Protection",
+          "unknown": "Unknown"
+        }
+      }
     }
   }
 }

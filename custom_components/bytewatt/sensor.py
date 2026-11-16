@@ -3,8 +3,9 @@ import logging
 from typing import Callable, Dict, Optional, Any
 from datetime import datetime
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import PERCENTAGE, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import (
@@ -40,6 +41,11 @@ from .const import (
     SENSOR_TREES_PLANTED,
     SENSOR_CO2_REDUCTION,
     SENSOR_TOTAL_BATTERY_DISCHARGE,
+)
+from .inverters import (
+    INVERTER_STATUS_OPTIONS,
+    ByteWattInverterEntity,
+    async_add_inverter_entities,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -316,6 +322,78 @@ async def async_setup_entry(
     ]
     
     async_add_entities(soc_sensors + grid_sensors + daily_stats_sensors)
+
+    async_add_inverter_entities(
+        coordinator, entry, async_add_entities,
+        lambda sn: [
+            *(ByteWattInverterPowerSensor(coordinator, entry, sn, key) for key in INVERTER_SENSORS),
+            ByteWattInverterStatusSensor(coordinator, entry, sn, "status"),
+        ],
+    )
+
+
+INVERTER_SENSORS = {
+    "soc": ("Battery Percentage", SensorDeviceClass.BATTERY, PERCENTAGE, None),
+    "pbat": ("Battery Power", SensorDeviceClass.POWER, UnitOfPower.WATT, "mdi:battery-charging"),
+    "ppv": ("PV Power", SensorDeviceClass.POWER, UnitOfPower.WATT, "mdi:solar-power"),
+    "pload": ("House Consumption", SensorDeviceClass.POWER, UnitOfPower.WATT,
+              "mdi:home-lightning-bolt"),
+    "pgrid": ("Grid Consumption", SensorDeviceClass.POWER, UnitOfPower.WATT,
+              "mdi:transmission-tower"),
+}
+STATUS_ATTRIBUTES = (
+    "inverter_model", "battery_model", "ems_version", "bms_version", "inverter_version",
+    "inverter_power_kw", "pv_capacity_kw", "battery_capacity_kwh", "usable_capacity_kwh",
+)
+
+
+class ByteWattInverterPowerSensor(ByteWattInverterEntity, SensorEntity):
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator, entry, sys_sn: str, key: str) -> None:
+        super().__init__(coordinator, entry, sys_sn, key)
+        self._key = key
+        (self._attr_name, self._attr_device_class,
+         self._attr_native_unit_of_measurement, self._attr_icon) = INVERTER_SENSORS[key]
+
+    @property
+    def available(self) -> bool:
+        return self._fresh_power()
+
+    @property
+    def native_value(self):
+        return (self.inverter.get("power") or {}).get(self._key)
+
+
+class ByteWattInverterStatusSensor(ByteWattInverterEntity, SensorEntity):
+    _attr_name = "Status"
+    _attr_translation_key = "inverter_status"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = INVERTER_STATUS_OPTIONS
+
+    @property
+    def available(self) -> bool:
+        return self._fresh_status()
+
+    @property
+    def native_value(self) -> Optional[str]:
+        return self.inverter.get("status")
+
+    @property
+    def icon(self) -> str:
+        ok = self.inverter.get("status") == "normal"
+        return "mdi:check-circle-outline" if ok else "mdi:alert-circle-outline"
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        inv = self.inverter
+        checked = inv.get("status_updated")
+        return {
+            "cloud_status": inv.get("status_raw"),
+            "role": "host" if inv.get("is_host") else "follower",
+            **{key: inv.get(key) for key in STATUS_ATTRIBUTES},
+            "status_checked": checked.isoformat() if checked else None,
+        }
 
 
 class ByteWattSensor(CoordinatorEntity, SensorEntity):

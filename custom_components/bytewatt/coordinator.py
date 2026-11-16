@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional, Set
 import voluptuous as vol
 from homeassistant.components.persistent_notification import async_create, async_dismiss
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_time_change,
@@ -21,6 +22,9 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .bytewatt_client import ByteWattClient
+from .inverters import (
+    apply_power_data, apply_system_list, apply_versions, device_prefix, firmware,
+)
 from .const import (
     DOMAIN,
     CONF_HEARTBEAT_INTERVAL,
@@ -29,6 +33,8 @@ from .const import (
     CONF_NOTIFY_ON_RECOVERY,
     CONF_DIAGNOSTICS_MODE,
     CONF_AUTO_RECONNECT_TIME,
+    CONF_INVERTER_LIST_INTERVAL,
+    DEFAULT_INVERTER_LIST_INTERVAL,
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_MAX_DATA_AGE,
     DEFAULT_STALE_CHECKS_THRESHOLD,
@@ -45,6 +51,9 @@ from .utilities.connection_stats import ConnectionStatistics
 from .utilities.diagnostic_service import DiagnosticService
 
 _LOGGER = logging.getLogger(__name__)
+
+STALE_INVERTER_LIST_READS = 2
+INVERTER_VERSIONS_INTERVAL_S = 24 * 3600
 
 # Notification IDs
 NOTIFICATION_RECOVERY = "bytewatt_recovery"
@@ -79,6 +88,12 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
         # callback would fire on a torn-down coordinator.
         self._recovery_retry_unsub = None
 
+        self.inverters: Dict[str, Dict[str, Any]] = {}
+        self._last_system_list: Optional[datetime] = None
+        self._versions_fetched: Optional[datetime] = None
+        self._rescan_requested = True
+        self._missing_reads: Dict[str, int] = {}
+        self._inverter_lock = asyncio.Lock()
 
         # Connection health tracking
         self.circuit_breaker = CircuitBreaker()
@@ -94,6 +109,9 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
         self._notify_on_recovery = options.get(CONF_NOTIFY_ON_RECOVERY, DEFAULT_NOTIFY_ON_RECOVERY)
         self._diagnostics_mode = options.get(CONF_DIAGNOSTICS_MODE, DEFAULT_DIAGNOSTICS_MODE)
         self._auto_reconnect_time = options.get(CONF_AUTO_RECONNECT_TIME, DEFAULT_AUTO_RECONNECT_TIME)
+        self._system_list_interval = 60.0 * float(
+            options.get(CONF_INVERTER_LIST_INTERVAL, DEFAULT_INVERTER_LIST_INTERVAL)
+        )
         
         if self._diagnostics_mode:
             self.diagnostic_service.enable_diagnostics()
@@ -184,6 +202,13 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
             if manager is not None:
                 await manager.refresh()
             
+            try:
+                if battery_data:
+                    async with self._inverter_lock:
+                        await self._refresh_inverters()
+            except Exception as err:
+                _LOGGER.warning("Per-inverter refresh failed: %s", err)
+
             # If we got battery data, update our cached version and last successful time
             if battery_data:
                 self._last_battery_data = battery_data
@@ -266,6 +291,88 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
 
                 raise UpdateFailed(f"Error communicating with API: {err}")
     
+    @property
+    def inverter_stale_after(self) -> float:
+        return max(float(self._max_data_age), 3.0 * float(self._scan_interval))
+
+    @property
+    def inverter_status_stale_after(self) -> float:
+        return max(self.inverter_stale_after, 2 * self._system_list_interval + self._scan_interval)
+
+    def request_inverter_rescan(self) -> None:
+        self._rescan_requested = True
+
+    async def _refresh_inverters(self) -> None:
+        now = dt_util.utcnow()
+        if (
+            self._rescan_requested
+            or self._last_system_list is None
+            or (now - self._last_system_list).total_seconds() >= self._system_list_interval
+        ):
+            await self._refresh_system_list(now)
+
+        sys_sns = list(self.inverters)
+        results = await asyncio.gather(
+            *(self.client.api_client.async_get_system_power_data(sn) for sn in sys_sns),
+            return_exceptions=True,
+        )
+        for sys_sn, result in zip(sys_sns, results):
+            if not isinstance(result, BaseException):
+                apply_power_data(self.inverters, sys_sn, result, now)
+
+    async def _refresh_system_list(self, now: datetime) -> None:
+        try:
+            systems = await self.client.api_client.async_get_system_list()
+        except Exception:
+            systems = None
+        if systems is None:
+            return
+        versions_due = (
+            self._rescan_requested
+            or self._versions_fetched is None
+            or (now - self._versions_fetched).total_seconds() >= INVERTER_VERSIONS_INTERVAL_S
+        )
+        self._last_system_list = now
+        self._rescan_requested = False
+        host_id = getattr(self.client.api_client, "host_system_id", "") or ""
+        seen = apply_system_list(self.inverters, systems, host_id, now)
+        if seen:
+            self._remove_stale_inverters(set(seen))
+        if versions_due or any("versions_checked" not in i for i in self.inverters.values()):
+            try:
+                versions = await self.client.api_client.async_get_system_versions()
+            except Exception:
+                versions = None
+            if versions is not None:
+                apply_versions(self.inverters, versions, now)
+                self._versions_fetched = now
+                registry = dr.async_get(self.hass)
+                for sys_sn, inv in self.inverters.items():
+                    device = registry.async_get_device(
+                        identifiers={(DOMAIN, device_prefix(self.entry_id) + sys_sn)}
+                    )
+                    if device and device.sw_version != firmware(inv):
+                        registry.async_update_device(device.id, sw_version=firmware(inv))
+
+    def _remove_stale_inverters(self, present: Set[str]) -> None:
+        prefix = device_prefix(self.entry_id)
+        registry = dr.async_get(self.hass)
+        devices = {
+            ident[len(prefix):]: device.id
+            for device in dr.async_entries_for_config_entry(registry, self.entry_id)
+            for domain, ident in device.identifiers
+            if domain == DOMAIN and ident.startswith(prefix)
+        }
+        missing = (set(self.inverters) | set(devices)) - present
+        self._missing_reads = {sn: self._missing_reads.get(sn, 0) + 1 for sn in missing}
+        for sys_sn, reads in list(self._missing_reads.items()):
+            if reads >= STALE_INVERTER_LIST_READS:
+                _LOGGER.info("Inverter ...%s left the account; removing it", sys_sn[-4:])
+                self.inverters.pop(sys_sn, None)
+                if sys_sn in devices:
+                    registry.async_remove_device(devices[sys_sn])
+                del self._missing_reads[sys_sn]
+
     async def start_heartbeat(self) -> None:
         """Start the heartbeat service to monitor and recover the integration."""
         if self._heartbeat_unsub is not None:
@@ -425,6 +532,7 @@ class ByteWattDataUpdateCoordinator(DataUpdateCoordinator):
             return
         self._recovery_in_progress = True
         self._recovery_attempts += 1
+        self.request_inverter_rescan()
 
         recovery_type = "scheduled" if is_scheduled else "automatic"
         _LOGGER.warning(

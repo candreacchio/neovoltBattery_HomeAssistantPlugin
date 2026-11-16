@@ -19,6 +19,8 @@ Requires Home Assistant **2024.11.0** or later.
   sequential writes). A **Discard Pending Settings** button drops them.
 - **Multi-inverter support** — pick which inverter is the Host during setup, change
   it later via Configure (no need to delete and re-add).
+- **Per-inverter devices** — each inverter's own battery % and power, cloud
+  **Status** and a **Problem** sensor (the account Battery Percentage is an average).
 - **Automatic recovery** — heartbeat monitoring, circuit breaker, auto-reconnect.
 
 ## Installation
@@ -58,6 +60,18 @@ Byte-Watt → ⋮ → Reconfigure.
 | `number` | Minimum SOC, Battery Charge Cap, Battery Charge Power, Battery Discharge Power, Grid Feed-in Cutoff SOC, Grid Feed-in Time1 Power |
 | `time`   | Charge Start/End, Discharge Start/End, Grid Feed-in Time1 Start/End |
 | `button` | **Submit Settings**, **Discard Pending Settings** |
+| per inverter | Battery Percentage, Battery / PV / House / Grid Power, **Status**, **Problem** (`binary_sensor`) |
+
+### Per-inverter devices
+
+Each inverter becomes a device under the account device. Its SOC and power are
+read every scan interval (`getLastPowerData?sysSn=<serial>`). Its status, and
+inverters added to or removed from the account, come from the system list,
+read every **Inverter status check interval** (default 5 min) and on
+`bytewatt.force_reconnect`. Firmware versions (`ems_version`, `bms_version`,
+`inverter_version`, attributes of Status) are read once a day. An inverter
+missing from two list reads in a row is removed; a failed or empty list never
+removes anything. Per-phase (three-phase) values are not exposed yet.
 
 ### Submit/Discard workflow
 
@@ -141,6 +155,7 @@ After install, Settings → Devices & Services → Byte-Watt → Configure:
 
 - **Scan interval** (seconds) — minimum 30, default 60. Changes apply
   immediately (the integration reloads on options changes).
+- **Inverter status check interval** (minutes) — 1 to 1440, default 5.
 
 ## Troubleshooting
 
