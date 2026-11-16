@@ -19,12 +19,16 @@ from .bytewatt_client import ByteWattClient
 from .const import (
     CONF_HOST_SYSTEM_ID,
     CONF_HOST_SYS_SN,
+    CONF_INVERTER_LIST_INTERVAL,
     CONF_PASSWORD,
     CONF_SCAN_INTERVAL,
     CONF_USERNAME,
     CURRENT_ENTRY_VERSION,
+    DEFAULT_INVERTER_LIST_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    MAX_INVERTER_LIST_INTERVAL,
+    MIN_INVERTER_LIST_INTERVAL,
     MIN_SCAN_INTERVAL,
 )
 
@@ -212,10 +216,10 @@ class ByteWattConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class ByteWattOptionsFlowHandler(config_entries.OptionsFlow):
-    """Options: scan interval only."""
+    """Options: scan interval and inverter status check interval."""
 
     def __init__(self, config_entry):
-        self.config_entry = config_entry
+        self._entry = config_entry
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
@@ -225,9 +229,16 @@ class ByteWattOptionsFlowHandler(config_entries.OptionsFlow):
             data_schema=vol.Schema({
                 vol.Optional(
                     CONF_SCAN_INTERVAL,
-                    default=self.config_entry.options.get(
+                    default=self._entry.options.get(
                         CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
                     ),
                 ): vol.All(vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL)),
+                vol.Optional(
+                    CONF_INVERTER_LIST_INTERVAL,
+                    default=self._entry.options.get(
+                        CONF_INVERTER_LIST_INTERVAL, DEFAULT_INVERTER_LIST_INTERVAL
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(
+                    min=MIN_INVERTER_LIST_INTERVAL, max=MAX_INVERTER_LIST_INTERVAL)),
             }),
         )
