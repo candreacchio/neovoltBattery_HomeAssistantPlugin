@@ -1,13 +1,5 @@
-"""Tests for low-level neovolt_client helpers and the encryption fail-loud contract.
-
-Load the relevant modules directly via importlib so the test suite doesn't
-need the full integration package to be importable (which would pull in
-voluptuous + homeassistant).
-"""
+"""Tests for low-level neovolt_client helpers and the encryption fail-loud contract."""
 from __future__ import annotations
-
-import importlib.util
-import os
 
 import pytest
 
@@ -16,20 +8,8 @@ pytest.importorskip("Crypto.Cipher")
 pytest.importorskip("aiohttp")
 
 
-def _load_module(rel_path: str, name: str):
-    here = os.path.dirname(__file__)
-    path = os.path.abspath(os.path.join(here, "..", "custom_components", "bytewatt", rel_path))
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-# neovolt_client imports homeassistant.helpers.aiohttp_client at module load —
-# skip cleanly when HA isn't installed (bare sandbox).
 try:
-    neovolt_auth = _load_module("api/neovolt_auth.py", "bytewatt_neovolt_auth")
-    neovolt_client = _load_module("api/neovolt_client.py", "bytewatt_neovolt_client")
+    from custom_components.bytewatt.api import neovolt_auth, neovolt_client
 except ModuleNotFoundError as exc:
     pytest.skip(f"Module not installed in this environment: {exc.name}", allow_module_level=True)
 

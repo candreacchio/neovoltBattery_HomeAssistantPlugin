@@ -15,10 +15,12 @@ from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 
 from .bytewatt_client import ByteWattClient
 from .coordinator import ByteWattDataUpdateCoordinator
+from .inverters import device_prefix
 from .settings_manager import SettingsManager, SettingsValidationError
 from .const import (
     DOMAIN,
@@ -31,6 +33,7 @@ from .const import (
     CONF_NOTIFY_ON_RECOVERY,
     CONF_DIAGNOSTICS_MODE,
     CONF_AUTO_RECONNECT_TIME,
+    CONF_INVERTER_LIST_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_RECOVERY_ENABLED,
     DEFAULT_HEARTBEAT_INTERVAL,
@@ -39,6 +42,7 @@ from .const import (
     DEFAULT_NOTIFY_ON_RECOVERY,
     DEFAULT_DIAGNOSTICS_MODE,
     DEFAULT_AUTO_RECONNECT_TIME,
+    DEFAULT_INVERTER_LIST_INTERVAL,
     SERVICE_SET_DISCHARGE_TIME,
     SERVICE_SET_DISCHARGE_START_TIME,
     SERVICE_SET_CHARGE_START_TIME,
@@ -76,7 +80,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-PLATFORMS = ["sensor", "number", "time", "switch", "button"]
+PLATFORMS = ["sensor", "binary_sensor", "number", "time", "switch", "button"]
 
 # Services are domain-level; registered once via hass.services.has_service() guard.
 
@@ -111,6 +115,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_NOTIFY_ON_RECOVERY:      options.get(CONF_NOTIFY_ON_RECOVERY, DEFAULT_NOTIFY_ON_RECOVERY),
         CONF_DIAGNOSTICS_MODE:        options.get(CONF_DIAGNOSTICS_MODE, DEFAULT_DIAGNOSTICS_MODE),
         CONF_AUTO_RECONNECT_TIME:     options.get(CONF_AUTO_RECONNECT_TIME, DEFAULT_AUTO_RECONNECT_TIME),
+        CONF_INVERTER_LIST_INTERVAL:  options.get(
+            CONF_INVERTER_LIST_INTERVAL, DEFAULT_INVERTER_LIST_INTERVAL
+        ),
     }
 
     client = ByteWattClient(
@@ -140,6 +147,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         _check_host_inverter_repair_issue(hass, entry, client)
 
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id, identifiers={(DOMAIN, entry.entry_id)}
+    )
     await coordinator.async_config_entry_first_refresh()
 
     if recovery_options[CONF_RECOVERY_ENABLED]:
@@ -164,6 +174,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     return True
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: ConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
+    coordinator = (hass.data.get(DOMAIN, {}).get(entry.entry_id) or {}).get("coordinator")
+    known = coordinator.inverters if coordinator is not None else {}
+    prefix = device_prefix(entry.entry_id)
+    return any(
+        domain == DOMAIN and ident.startswith(prefix) and ident[len(prefix):] not in known
+        for domain, ident in device_entry.identifiers
+    )
 
 
 def _stop_heartbeat_factory(coordinator):

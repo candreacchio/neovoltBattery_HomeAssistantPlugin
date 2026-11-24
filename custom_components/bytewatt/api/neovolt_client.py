@@ -2,7 +2,7 @@
 import logging
 import asyncio
 import aiohttp
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 
 from homeassistant.core import HomeAssistant
@@ -22,6 +22,8 @@ DEFAULT_BASE_URL = "https://monitor.byte-watt.com"
 # the server is misbehaving and we should fail loudly instead of recursing
 # forever and exhausting the stack.
 MAX_RELOGIN_RETRIES = 1
+
+SYSTEM_PAGE_SIZE = 50
 
 
 class ByteWattAPIError(Exception):
@@ -606,3 +608,48 @@ class NeovoltClient:
             return response.get("data") or []
         _LOGGER.warning("Could not fetch inverter list: %s", response)
         return []
+
+    async def async_get_system_list(self) -> Optional[List[Dict[str, Any]]]:
+        response = await self._async_get_success(
+            "api/stable/home/getCustomMenuEssList?inverterMode=0"
+        )
+        data = response.get("data", []) if response else None
+        if not isinstance(data, list):
+            return [] if response and data is None else None
+        return [system for system in data if isinstance(system, dict)]
+
+    async def async_get_system_power_data(self, sys_sn: str) -> Optional[Dict[str, Any]]:
+        response = await self._async_get_success(
+            f"api/report/energyStorage/getLastPowerData?sysSn={sys_sn}&stationId="
+        ) if sys_sn else None
+        data = response.get("data") if response else None
+        return data if isinstance(data, dict) else None
+
+    async def async_get_system_versions(self) -> Optional[Dict[str, Dict[str, str]]]:
+        versions: Dict[str, Dict[str, str]] = {}
+        any_ok = False
+        for path, field, key in (
+            ("home/getSystemPage", "bmsVersion", "bms_version"),
+            ("essSystemData/getSystemPage", "invVersion", "inverter_version"),
+        ):
+            response = await self._async_get_success(
+                f"api/stable/{path}?pageIndex=1&pageSize={SYSTEM_PAGE_SIZE}"
+            )
+            data = response.get("data") if response else None
+            rows = data.get("rows") if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                continue
+            any_ok = True
+            for row in rows:
+                value = row.get(field) if isinstance(row, dict) else None
+                if isinstance(value, str) and value.strip() and row.get("sysSn"):
+                    versions.setdefault(str(row["sysSn"]), {})[key] = value.strip()
+        return versions if any_ok else None
+
+    async def _async_get_success(self, endpoint: str) -> Optional[Dict[str, Any]]:
+        if not self.token and not await self.async_login():
+            return None
+        response = await self._async_get(endpoint)
+        if response and response.get("code") == 6069 and await self.async_login():
+            response = await self._async_get(endpoint)
+        return response if response and response.get("code") == 200 else None
